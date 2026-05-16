@@ -43,17 +43,25 @@ Ich werde den Mailserver auf meinem MacBookAir M4 machen, mit UTM virtualisere i
   - [8.1 Installation und Postfix](#81-installation-und-postfix)
   - [8.2 Whitelist und Verzoegerung](#82-whitelist-und-verzoegerung)
   - [8.3 Tests](#83-tests)
-- [9 DNSSEC](#9-dnssec)
-  - [9.1 Berechtigungen und Signierung](#91-berechtigungen-und-signierung)
-  - [9.2 Zonen und Vertrauenskette](#92-zonen-und-vertrauenskette)
-  - [9.3 Verifikation](#93-verifikation)
-- [10 Spam-Filter (Bayes)](#10-spam-filter-bayes)
-  - [10.1 Aktivierung und Amavis-Header](#101-aktivierung-und-amavis-header)
-  - [10.2 Datenbank und vertrauenswuerdige Netze](#102-datenbank-und-vertrauenswuerdige-netze)
-  - [10.3 Tests](#103-tests)
-- [11 Backup](#11-backup)
-- [12 Gesamttests und Abnahme](#12-gesamttests-und-abnahme)
-- [13 Quellen und KI-Nutzung](#13-quellen-und-ki-nutzung)
+- [9 Tarpit und Anti-UBE](#9-tarpit-und-anti-ube)
+  - [9.1 Tarpit-Konfiguration](#91-tarpit-konfiguration)
+  - [9.2 Anti-UBE-Konfiguration](#92-anti-ube-konfiguration)
+  - [9.3 Tests](#93-tests)
+- [10 DNSSEC](#10-dnssec)
+  - [10.1 Berechtigungen und Signierung](#101-berechtigungen-und-signierung)
+  - [10.2 Zonen und Vertrauenskette](#102-zonen-und-vertrauenskette)
+  - [10.3 Verifikation](#103-verifikation)
+- [11 Spam-Filter (Bayes)](#11-spam-filter-bayes)
+  - [11.1 Aktivierung und Amavis-Header](#111-aktivierung-und-amavis-header)
+  - [11.2 Datenbank und vertrauenswuerdige Netze](#112-datenbank-und-vertrauenswuerdige-netze)
+  - [11.3 Tests](#113-tests)
+- [12 Backup](#12-backup)
+- [13 Gesamttests und Abnahme](#13-gesamttests-und-abnahme)
+- [14 Bewertung und produktiver Betrieb](#14-bewertung-und-produktiver-betrieb)
+  - [14.1 Stärken und Schwächen](#141-stärken-und-schwächen)
+  - [14.2 Verbesserungsmöglichkeiten](#142-verbesserungsmöglichkeiten)
+  - [14.3 Betrieb in produktiver Umgebung](#143-betrieb-in-produktiver-umgebung)
+- [15 Quellen und KI-Nutzung](#15-quellen-und-ki-nutzung)
 
 ## 1 VM und Netzwerk
 
@@ -397,25 +405,594 @@ ping -c 3 google.com
 
 Wenn der Ping erfolgreich ist, verfügt die VM über eine stabile IP und eine funktionierende Namensauflösung.
 
+---
+
 ### 1.4 Zertifikate
+
+Für diese Laborumgebung wurden keine zusätzlichen Zertifikate eingerichtet. Die im Auftrag geforderten Sicherungsmassnahmen beziehen sich auf die Mailinfrastruktur selbst, insbesondere DNS, Postfix, SPF/DKIM, Greylisting, Tarpit, Anti-UBE, DNSSEC sowie Viren- und Spamfilterung.
+
+Ein zusätzlicher Import der CyberLab-Zertifizierungsstelle wäre nur notwendig, falls interne HTTPS-Dienste mit eigenen Zertifikaten verwendet werden und die VM diesen Zertifikaten vertrauen muss. Für den hier dokumentierten Mailserver-Aufbau war dies nicht erforderlich.
+
+---
 
 ## 2 DNS (BIND9)
 
+In diesem Kapitel richten wir BIND9 als autoritativen DNS-Server für `u8.cyberlab.fhnw.ch` ein. Dazu erstellen wir eine Forward-Zone, eine Reverse-Zone und prüfen anschliessend, ob die Namensauflösung intern sowie über den CyberLab-DNS korrekt funktioniert.
+
 ### 2.1 Installation und Basis
+
+Zuerst prüfen wir, ob BIND9 bereits installiert ist:
+
+```bash
+# command
+dpkg -l | grep -E "bind9|dnsutils"
+
+# response
+ii  bind9-dnsutils                    1:9.20.21-1~deb13u1                  arm64        Clients provided with BIND 9
+ii  bind9-host                        1:9.20.21-1~deb13u1                  arm64        DNS Lookup Utility
+ii  bind9-libs:arm64                  1:9.20.21-1~deb13u1                  arm64        Shared Libraries used by BIND 9
+```
+
+Es sind bereits DNS-Tools vorhanden, aber der eigentliche BIND9-Server fehlt noch. Deshalb installieren wir `bind9`:
+
+```bash
+# command
+sudo apt install -y bind9
+```
+
+Danach prüfen wir, ob der Dienst läuft:
+
+```bash
+# command
+systemctl status bind9 --no-pager
+
+# response
+● named.service - BIND Domain Name Server
+     Loaded: loaded (/usr/lib/systemd/system/named.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-05-16 14:45:34 CEST; 49s ago
+ Invocation: 8eade6df3aaf4256982b6e006bd0f434
+       Docs: man:named(8)
+   Main PID: 981 (named)
+     Status: "running"
+      Tasks: 8 (limit: 4579)
+     Memory: 41.2M (peak: 41.6M)
+        CPU: 15ms
+     CGroup: /system.slice/named.service
+             └─981 /usr/sbin/named -f -u bind
+```
+
+Zusätzlich setzen wir die lokale Host-Auflösung korrekt. Der Name `mail.u8.cyberlab.fhnw.ch` soll nicht auf `127.0.1.1`, sondern auf die statische Server-IP zeigen:
+
+```bash
+# command
+grep -nE "127\.0\.1\.1|mail\.u8\.cyberlab\.fhnw\.ch|u8\.cyberlab\.fhnw\.ch|mail" /etc/hosts
+
+# response
+2:127.0.1.1 mail.u8.cyberlab.fhnw.ch mail
+```
+
+Wir passen die Datei an:
+
+```bash
+# command
+sudo nano /etc/hosts
+```
+
+Danach sieht die Datei so aus:
+
+```bash
+# command
+cat /etc/hosts
+
+# response
+127.0.0.1 localhost
+192.168.97.64 mail.u8.cyberlab.fhnw.ch mail
+
+# The following lines are desirable for IPv6 capable hosts
+::1     localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+```
 
 ### 2.2 Zonenreferenz und Dateipfade
 
+Für die DNS-Zonen erstellen wir ein eigenes Verzeichnis unter `/var/lib/bind`. Dort werden später die Forward- und Reverse-Zonendateien abgelegt.
+
+```bash
+# command
+sudo mkdir -p /var/lib/bind/u8.cyberlab.fhnw.ch && sudo chown -R bind:bind /var/lib/bind/u8.cyberlab.fhnw.ch && ls -ld /var/lib/bind/u8.cyberlab.fhnw.ch
+
+# response
+drwxr-xr-x 2 bind bind 4096 May 16 14:47 /var/lib/bind/u8.cyberlab.fhnw.ch
+```
+
+Danach legen wir die beiden Zonendateien an:
+
+```bash
+# command
+sudo touch /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db /var/lib/bind/u8.cyberlab.fhnw.ch/reverse.db && sudo chown bind:bind /var/lib/bind/u8.cyberlab.fhnw.ch/*.db && ls -l /var/lib/bind/u8.cyberlab.fhnw.ch/
+
+# response
+total 0
+-rw-r--r-- 1 bind bind 0 May 16 14:48 forward.db
+-rw-r--r-- 1 bind bind 0 May 16 14:48 reverse.db
+```
+
+Anschliessend prüfen wir die lokale BIND-Konfigurationsdatei:
+
+```bash
+# command
+cat /etc/bind/named.conf.local
+
+# response
+//
+// Do any local configuration here
+//
+```
+
+Nun tragen wir die Forward- und Reverse-Zone ein:
+
+```bash
+# command
+sudo nano /etc/bind/named.conf.local
+```
+
+Die Datei enthält danach:
+
+```bash
+# command
+cat /etc/bind/named.conf.local
+
+# response
+//
+// Do any local configuration here
+//
+
+zone "u8.cyberlab.fhnw.ch" {
+    type master;
+    file "/var/lib/bind/u8.cyberlab.fhnw.ch/forward.db";
+};
+
+zone "64/29.97.168.192.in-addr.arpa" {
+    type master;
+    file "/var/lib/bind/u8.cyberlab.fhnw.ch/reverse.db";
+};
+```
+
+Die Konfiguration wird anschliessend geprüft:
+
+```bash
+# command
+sudo named-checkconf
+
+# response
+# keine Ausgabe
+```
+
+Keine Ausgabe bedeutet, dass die BIND-Konfiguration syntaktisch korrekt ist.
+
 ### 2.3 Forward-Zone
+
+Nun erstellen wir die Forward-Zone. Diese bildet Namen wie `mail.u8.cyberlab.fhnw.ch` auf IP-Adressen ab.
+
+```bash
+# command
+sudo nano /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+```
+
+Die Datei enthält danach:
+
+```bash
+# command
+cat /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+
+# response
+$TTL 86400
+@   IN SOA ns1.u8.cyberlab.fhnw.ch. admin.u8.cyberlab.fhnw.ch. (
+        2026051601 ; serial
+        3600       ; refresh
+        1800       ; retry
+        604800     ; expire
+        86400      ; negative cache
+)
+
+; Nameserver
+@    IN NS ns1.u8.cyberlab.fhnw.ch.
+
+; Hosts
+ns1  IN A 192.168.97.64
+mail IN A 192.168.97.64
+
+; Mail exchange
+@    IN MX 10 mail.u8.cyberlab.fhnw.ch.
+```
+
+Die Forward-Zone wird danach geprüft:
+
+```bash
+# command
+sudo named-checkzone u8.cyberlab.fhnw.ch /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+
+# response
+zone u8.cyberlab.fhnw.ch/IN: loaded serial 2026051601
+OK
+```
 
 ### 2.4 Reverse-Zone
 
+Nun erstellen wir die Reverse-Zone. Diese bildet die IP-Adresse `192.168.97.64` zurück auf den Hostnamen `mail.u8.cyberlab.fhnw.ch`.
+
+```bash
+# command
+sudo nano /var/lib/bind/u8.cyberlab.fhnw.ch/reverse.db
+```
+
+Die Datei enthält danach:
+
+```bash
+# command
+cat /var/lib/bind/u8.cyberlab.fhnw.ch/reverse.db
+
+# response
+$TTL 86400
+@   IN SOA ns1.u8.cyberlab.fhnw.ch. admin.u8.cyberlab.fhnw.ch. (
+        2026051601 ; serial
+        3600       ; refresh
+        1800       ; retry
+        604800     ; expire
+        86400      ; negative cache
+)
+
+; Nameserver
+@   IN NS ns1.u8.cyberlab.fhnw.ch.
+
+; PTR Records
+64  IN PTR mail.u8.cyberlab.fhnw.ch.
+```
+
+Die Reverse-Zone wird danach geprüft:
+
+```bash
+# command
+sudo named-checkzone 64/29.97.168.192.in-addr.arpa /var/lib/bind/u8.cyberlab.fhnw.ch/reverse.db
+
+# response
+zone 64/29.97.168.192.in-addr.arpa/IN: loaded serial 2026051601
+OK
+```
+
+Danach starten wir BIND9 neu:
+
+```bash
+# command
+sudo systemctl restart bind9
+```
+
+Anschliessend prüfen wir den Status:
+
+```bash
+# command
+systemctl status bind9 --no-pager
+
+# response
+● named.service - BIND Domain Name Server
+     Loaded: loaded (/usr/lib/systemd/system/named.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-05-16 14:55:08 CEST; 7s ago
+ Invocation: df91f16dc3824dc892858aeea5c43e55
+       Docs: man:named(8)
+   Main PID: 1063 (named)
+     Status: "running"
+      Tasks: 6 (limit: 4579)
+     Memory: 37.1M (peak: 37.5M)
+        CPU: 23ms
+     CGroup: /system.slice/named.service
+             └─1063 /usr/sbin/named -f -u bind
+```
+
 ### 2.5 Tests
+
+Zuerst testen wir die Forward-Zone direkt über den lokalen BIND-Server:
+
+```bash
+# command
+dig @127.0.0.1 mail.u8.cyberlab.fhnw.ch
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> @127.0.0.1 mail.u8.cyberlab.fhnw.ch
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 5091
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 50238781c9ed199c010000006a08695fd9852689da6e44a6 (good)
+;; QUESTION SECTION:
+;mail.u8.cyberlab.fhnw.ch. IN A
+
+;; ANSWER SECTION:
+mail.u8.cyberlab.fhnw.ch. 86400 IN A 192.168.97.64
+
+;; Query time: 0 msec
+;; SERVER: 127.0.0.1#53(127.0.0.1) (UDP)
+;; WHEN: Sat May 16 14:55:59 CEST 2026
+;; MSG SIZE  rcvd: 97
+```
+
+Danach testen wir die Reverse-Zone direkt über den lokalen BIND-Server:
+
+```bash
+# command
+dig @127.0.0.1 64.64/29.97.168.192.in-addr.arpa PTR
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> @127.0.0.1 64.64/29.97.168.192.in-addr.arpa PTR
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 24663
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: a6952804fb789834010000006a0869a3967eaab4a7d4bf0c (good)
+;; QUESTION SECTION:
+;64.64/29.97.168.192.in-addr.arpa. IN PTR
+
+;; ANSWER SECTION:
+64.64/29.97.168.192.in-addr.arpa. 86400 IN PTR mail.u8.cyberlab.fhnw.ch.
+
+;; Query time: 0 msec
+;; SERVER: 127.0.0.1#53(127.0.0.1) (UDP)
+;; WHEN: Sat May 16 14:57:07 CEST 2026
+;; MSG SIZE  rcvd: 127
+```
+
+Nun testen wir die normale Reverse-Auflösung:
+
+```bash
+# command
+dig -x 192.168.97.64
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> -x 192.168.97.64
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 16884
+;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 65494
+;; QUESTION SECTION:
+;64.97.168.192.in-addr.arpa. IN PTR
+
+;; ANSWER SECTION:
+64.97.168.192.in-addr.arpa. 604800 IN CNAME 64.64/29.97.168.192.in-addr.arpa.
+64.64/29.97.168.192.in-addr.arpa. 10 IN PTR mail.u8.cyberlab.fhnw.ch.
+
+;; Query time: 1923 msec
+;; SERVER: 127.0.0.53#53(127.0.0.53) (UDP)
+;; WHEN: Sat May 16 14:58:02 CEST 2026
+;; MSG SIZE  rcvd: 116
+```
+
+Auch die normale Forward-Auflösung zeigt nun auf die richtige IP-Adresse:
+
+```bash
+# command
+dig mail.u8.cyberlab.fhnw.ch
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> mail.u8.cyberlab.fhnw.ch
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 64822
+;; flags: qr aa rd ra ad; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 65494
+;; QUESTION SECTION:
+;mail.u8.cyberlab.fhnw.ch. IN A
+
+;; ANSWER SECTION:
+mail.u8.cyberlab.fhnw.ch. 0 IN A 192.168.97.64
+
+;; Query time: 0 msec
+;; SERVER: 127.0.0.53#53(127.0.0.53) (UDP)
+;; WHEN: Sat May 16 15:02:35 CEST 2026
+;; MSG SIZE  rcvd: 69
+```
+
+Danach testen wir, ob BIND9 auch über die echte Server-IP erreichbar ist:
+
+```bash
+# command
+dig @192.168.97.64 mail.u8.cyberlab.fhnw.ch
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> @192.168.97.64 mail.u8.cyberlab.fhnw.ch
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 28202
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: ef9ec678f2a038a2010000006a086b2224645e367da26af9 (good)
+;; QUESTION SECTION:
+;mail.u8.cyberlab.fhnw.ch. IN A
+
+;; ANSWER SECTION:
+mail.u8.cyberlab.fhnw.ch. 86400 IN A 192.168.97.64
+
+;; Query time: 0 msec
+;; SERVER: 192.168.97.64#53(192.168.97.64) (UDP)
+;; WHEN: Sat May 16 15:03:30 CEST 2026
+;; MSG SIZE  rcvd: 97
+```
+
+Auch die Reverse-Zone funktioniert über die echte Server-IP:
+
+```bash
+# command
+dig @192.168.97.64 64.64/29.97.168.192.in-addr.arpa PTR
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> @192.168.97.64 64.64/29.97.168.192.in-addr.arpa PTR
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 6764
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 0de72553b4e9da78010000006a086b554a94adb5a2852eda (good)
+;; QUESTION SECTION:
+;64.64/29.97.168.192.in-addr.arpa. IN PTR
+
+;; ANSWER SECTION:
+64.64/29.97.168.192.in-addr.arpa. 86400 IN PTR mail.u8.cyberlab.fhnw.ch.
+
+;; Query time: 0 msec
+;; SERVER: 192.168.97.64#53(192.168.97.64) (UDP)
+;; WHEN: Sat May 16 15:04:21 CEST 2026
+;; MSG SIZE  rcvd: 127
+```
+
+Der MX-Record wird ebenfalls korrekt ausgeliefert:
+
+```bash
+# command
+dig @192.168.97.64 u8.cyberlab.fhnw.ch MX
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> @192.168.97.64 u8.cyberlab.fhnw.ch MX
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 42944
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 2
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 825f2a2aa151b0e2010000006a086b905dda4a74624c249b (good)
+;; QUESTION SECTION:
+;u8.cyberlab.fhnw.ch.  IN MX
+
+;; ANSWER SECTION:
+u8.cyberlab.fhnw.ch. 86400 IN MX 10 mail.u8.cyberlab.fhnw.ch.
+
+;; ADDITIONAL SECTION:
+mail.u8.cyberlab.fhnw.ch. 86400 IN A 192.168.97.64
+
+;; Query time: 0 msec
+;; SERVER: 192.168.97.64#53(192.168.97.64) (UDP)
+;; WHEN: Sat May 16 15:05:20 CEST 2026
+;; MSG SIZE  rcvd: 113
+```
+
+Zum Schluss testen wir die Auflösung über den CyberLab-DNS `192.168.64.10`.
+
+```bash
+# command
+dig @192.168.64.10 mail.u8.cyberlab.fhnw.ch
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> @192.168.64.10 mail.u8.cyberlab.fhnw.ch
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 12127
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 397fd1d3f2289445010000006a086bd8b489895d852eedf4 (good)
+;; QUESTION SECTION:
+;mail.u8.cyberlab.fhnw.ch. IN A
+
+;; ANSWER SECTION:
+mail.u8.cyberlab.fhnw.ch. 10 IN A 192.168.97.64
+
+;; Query time: 819 msec
+;; SERVER: 192.168.64.10#53(192.168.64.10) (UDP)
+;; WHEN: Sat May 16 15:06:32 CEST 2026
+;; MSG SIZE  rcvd: 97
+```
+
+Auch der MX-Record ist über den CyberLab-DNS sichtbar:
+
+```bash
+# command
+dig @192.168.64.10 u8.cyberlab.fhnw.ch MX
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> @192.168.64.10 u8.cyberlab.fhnw.ch MX
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 27128
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 06244426ba818656010000006a086c28807bb1aa0fad8f11 (good)
+;; QUESTION SECTION:
+;u8.cyberlab.fhnw.ch.  IN MX
+
+;; ANSWER SECTION:
+u8.cyberlab.fhnw.ch. 10 IN MX 10 mail.u8.cyberlab.fhnw.ch.
+
+;; Query time: 15 msec
+;; SERVER: 192.168.64.10#53(192.168.64.10) (UDP)
+;; WHEN: Sat May 16 15:07:52 CEST 2026
+;; MSG SIZE  rcvd: 97
+```
+
+Auch die Reverse-Auflösung funktioniert über den CyberLab-DNS:
+
+```bash
+# command
+dig @192.168.64.10 -x 192.168.97.64
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> @192.168.64.10 -x 192.168.97.64
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 3340
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 7c702dd5c73be429010000006a086c691d4a4c1cbfa6593b (good)
+;; QUESTION SECTION:
+;64.97.168.192.in-addr.arpa. IN PTR
+
+;; ANSWER SECTION:
+64.97.168.192.in-addr.arpa. 604800 IN CNAME 64.64/29.97.168.192.in-addr.arpa.
+64.64/29.97.168.192.in-addr.arpa. 10 IN PTR mail.u8.cyberlab.fhnw.ch.
+
+;; Query time: 1227 msec
+;; SERVER: 192.168.64.10#53(192.168.64.10) (UDP)
+;; WHEN: Sat May 16 15:08:57 CEST 2026
+;; MSG SIZE  rcvd: 167
+```
+
+Damit ist BIND9 korrekt eingerichtet. Forward Lookup, Reverse Lookup und MX Lookup funktionieren sowohl direkt über den eigenen DNS-Server als auch über den CyberLab-DNS.
+
+---
 
 ## 3 Mailserver (Postfix)
 
 ### 3.1 Installation
 
 ### 3.2 Konfiguration und Smoke-Tests
+
+---
 
 ## 4 SPF
 
@@ -459,24 +1036,40 @@ Wenn der Ping erfolgreich ist, verfügt die VM über eine stabile IP und eine fu
 
 ### 8.3 Tests
 
-## 9 DNSSEC
+## 9 Tarpit und Anti-UBE
 
-### 9.1 Berechtigungen und Signierung
+### 9.1 Tarpit-Konfiguration
 
-### 9.2 Zonen und Vertrauenskette
+### 9.2 Anti-UBE-Konfiguration
 
-### 9.3 Verifikation
+### 9.3 Tests
 
-## 10 Spam-Filter (Bayes)
+## 10 DNSSEC
 
-### 10.1 Aktivierung und Amavis-Header
+### 10.1 Berechtigungen und Signierung
 
-### 10.2 Datenbank und vertrauenswuerdige Netze
+### 10.2 Zonen und Vertrauenskette
 
-### 10.3 Tests
+### 10.3 Verifikation
 
-## 11 Backup
+## 11 Spam-Filter (Bayes)
 
-## 12 Gesamttests und Abnahme
+### 11.1 Aktivierung und Amavis-Header
 
-## 13 Quellen und KI-Nutzung
+### 11.2 Datenbank und vertrauenswuerdige Netze
+
+### 11.3 Tests
+
+## 12 Backup
+
+## 13 Gesamttests und Abnahme
+
+## 14 Bewertung und produktiver Betrieb
+
+### 14.1 Stärken und Schwächen
+
+### 14.2 Verbesserungsmöglichkeiten
+
+### 14.3 Betrieb in produktiver Umgebung
+
+## 15 Quellen und KI-Nutzung
