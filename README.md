@@ -1360,11 +1360,311 @@ Damit ist die Postfix-Grundkonfiguration erfolgreich abgeschlossen.
 
 ## 4 SPF
 
+In diesem Kapitel richten wir SPF (Sender Policy Framework) für unsere Mail-Domain `u8.cyberlab.fhnw.ch` ein. SPF wird verwendet, um festzulegen, welche Mailserver E-Mails im Namen unserer Domain versenden dürfen. Dadurch können empfangende Mailserver prüfen, ob eine Mail wirklich von einem erlaubten Server stammt.
+
+Wir konfigurieren SPF in zwei Schritten: Zuerst erstellen wir einen DNS-TXT-Record für ausgehende Mails. Danach binden wir eine SPF-Prüfung in Postfix ein, damit auch eingehende Mails auf gültige SPF-Einträge geprüft werden.
+
 ### 4.1 Ausgehend
+
+Für ausgehende Mails muss in der Forward-Zone ein SPF-TXT-Record ergänzt werden. Zuerst prüfen wir die aktuelle Zonendatei:
+
+```bash
+# command
+cat /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+
+# response
+$TTL 86400
+@   IN SOA ns1.u8.cyberlab.fhnw.ch. admin.u8.cyberlab.fhnw.ch. (
+        2026051601 ; serial
+        3600       ; refresh
+        1800       ; retry
+        604800     ; expire
+        86400      ; negative cache
+)
+
+; Nameserver
+@    IN NS ns1.u8.cyberlab.fhnw.ch.
+
+; Hosts
+ns1  IN A 192.168.97.64
+mail IN A 192.168.97.64
+
+; Mail exchange
+@    IN MX 10 mail.u8.cyberlab.fhnw.ch.
+````
+
+Der SPF-Record fehlt noch. Deshalb erhöhen wir zuerst die Serial der Zone und fügen danach den TXT-Record hinzu:
+
+```bash
+# command
+sudo sh -c 'sed -i "s/2026051601/2026051602/" /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db && printf "\n; SPF\n@    IN TXT \"v=spf1 mx -all\"\n" >> /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db && cat /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db'
+
+# response
+$TTL 86400
+@   IN SOA ns1.u8.cyberlab.fhnw.ch. admin.u8.cyberlab.fhnw.ch. (
+        2026051602 ; serial
+        3600       ; refresh
+        1800       ; retry
+        604800     ; expire
+        86400      ; negative cache
+)
+
+; Nameserver
+@    IN NS ns1.u8.cyberlab.fhnw.ch.
+
+; Hosts
+ns1  IN A 192.168.97.64
+mail IN A 192.168.97.64
+
+; Mail exchange
+@    IN MX 10 mail.u8.cyberlab.fhnw.ch.
+
+; SPF
+@    IN TXT "v=spf1 mx -all"
+```
+
+Der SPF-Eintrag bedeutet, dass nur der im MX-Record definierte Mailserver E-Mails für `u8.cyberlab.fhnw.ch` versenden darf. Durch `-all` werden alle anderen Server explizit als nicht erlaubt markiert.
+
+Anschliessend prüfen wir die Zonendatei:
+
+```bash
+# command
+sudo named-checkzone u8.cyberlab.fhnw.ch /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+
+# response
+zone u8.cyberlab.fhnw.ch/IN: loaded serial 2026051602
+OK
+```
+
+Die Ausgabe `OK` zeigt, dass die Zonendatei syntaktisch korrekt ist. Danach laden wir BIND neu, damit der neue SPF-Record aktiv wird:
+
+```bash
+# command
+sudo rndc reload
+
+# response
+server reload successful
+```
+
+Zum Schluss prüfen wir den TXT-Record über DNS:
+
+```bash
+# command
+dig u8.cyberlab.fhnw.ch TXT
+
+# response
+; <<>> DiG 9.20.21-1~deb13u1-Debian <<>> u8.cyberlab.fhnw.ch TXT
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 65422
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 65494
+;; QUESTION SECTION:
+;u8.cyberlab.fhnw.ch.        IN  TXT
+
+;; ANSWER SECTION:
+u8.cyberlab.fhnw.ch. 10 IN TXT "v=spf1 mx -all"
+
+;; Query time: 816 msec
+;; SERVER: 127.0.0.53#53(127.0.0.53) (UDP)
+;; WHEN: Sat May 16 16:35:07 CEST 2026
+;; MSG SIZE  rcvd: 75
+```
+
+Damit ist SPF für ausgehende Mails eingerichtet. Andere Mailserver können nun erkennen, dass nur unser Mailserver gemäss MX-Record berechtigt ist, Mails für diese Domain zu senden.
 
 ### 4.2 Eingehend
 
+Damit unser Mailserver eingehende Mails ebenfalls anhand von SPF prüfen kann, installieren wir das Paket `postfix-policyd-spf-perl`. Dieses stellt einen Policy-Dienst bereit, den Postfix beim Empfang einer Mail aufrufen kann.
+
+```bash
+# command
+sudo apt install -y postfix-policyd-spf-perl
+```
+
+Nach der Installation prüfen wir zuerst, ob der SPF-Policy-Dienst bereits in der Postfix-Datei `master.cf` eingetragen ist:
+
+```bash
+# command
+grep -n "policyd-spf" /etc/postfix/master.cf
+
+# response
+# keine Ausgabe
+```
+
+Da keine Ausgabe erscheint, ist der Dienst noch nicht eingetragen. Deshalb ergänzen wir ihn am Ende der Datei:
+
+```bash
+# command
+sudo sh -c 'printf "\npolicyd-spf  unix  -       n       n       -       0       spawn\n    user=policyd-spf argv=/usr/sbin/postfix-policyd-spf-perl\n" >> /etc/postfix/master.cf && tail -n 6 /etc/postfix/master.cf'
+
+# response
+#mailman   unix  -       n       n       -       -       pipe
+#  flags=FRX user=list argv=/usr/lib/mailman/bin/postfix-to-mailman.py
+#  ${nexthop} ${user}
+
+policyd-spf  unix  -       n       n       -       0       spawn
+    user=policyd-spf argv=/usr/sbin/postfix-policyd-spf-perl
+```
+
+Damit kennt Postfix nun den SPF-Policy-Dienst. Dieser Dienst wird aber noch nicht automatisch verwendet. Deshalb prüfen wir zuerst die aktuelle Einstellung von `smtpd_recipient_restrictions`:
+
+```bash
+# command
+sudo postconf smtpd_recipient_restrictions
+
+# response
+smtpd_recipient_restrictions =
+```
+
+Die Einstellung ist aktuell leer. Nun konfigurieren wir Postfix so, dass bei eingehenden Mails der SPF-Policy-Dienst verwendet wird:
+
+```bash
+# command
+sudo postconf -e "smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, check_policy_service unix:private/policyd-spf, reject_unauth_destination" && sudo postconf -n smtpd_recipient_restrictions
+
+# response
+smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, check_policy_service unix:private/policyd-spf, reject_unauth_destination
+```
+
+Die Reihenfolge bedeutet:
+
+- `permit_mynetworks`: vertrauenswürdige lokale Netze werden erlaubt
+- `permit_sasl_authenticated`: authentifizierte Benutzer werden erlaubt
+- `check_policy_service unix:private/policyd-spf`: alle anderen Absender werden per SPF geprüft
+- `reject_unauth_destination`: Mails an fremde Domains werden abgelehnt, wenn unser Server dafür nicht zuständig ist
+
+Danach starten wir Postfix neu:
+
+```bash
+# command
+sudo systemctl restart postfix
+```
+
+Zur Kontrolle prüfen wir den Status von Postfix:
+
+```bash
+# command
+systemctl status postfix --no-pager
+
+# response
+● postfix.service - Postfix Mail Transport Agent (main/default instance)
+     Loaded: loaded (/usr/lib/systemd/system/postfix.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-05-16 16:38:39 CEST; 33s ago
+ Invocation: 38c875b78b7047ee89c41f4357aa5607
+       Docs: man:postfix(1)
+    Process: 2530 ExecStartPre=postfix check (code=exited, status=0/SUCCESS)
+    Process: 2638 ExecStart=postfix debian-systemd-start (code=exited, status=0/SUCCESS)
+   Main PID: 2647 (master)
+      Tasks: 3 (limit: 4579)
+     Memory: 2.7M (peak: 5.2M)
+        CPU: 118ms
+     CGroup: /system.slice/postfix.service
+             ├─2647 /usr/lib/postfix/sbin/master -w
+             ├─2648 pickup -l -t unix -u -c
+             └─2649 qmgr -l -t unix -u
+```
+
+Der Status `active (running)` zeigt, dass Postfix nach der SPF-Konfiguration weiterhin korrekt läuft.
+
 ### 4.3 Tests
+
+Zum Testen senden wir eine Mail an den CyberLab-Reflector. Der Reflector sendet die Mail an uns zurück. Dadurch können wir prüfen, ob unser Mailserver beim Empfang der reflektierten Mail einen SPF-Check durchführt.
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to reflector@cyberlab.fhnw.ch --server 127.0.0.1
+
+# response
+=== Trying 127.0.0.1:25...
+=== Connected to 127.0.0.1.
+<-  220 mail.u8.cyberlab.fhnw.ch ESMTP Postfix
+ -> EHLO mail.u8.cyberlab.fhnw.ch
+<-  250-mail.u8.cyberlab.fhnw.ch
+<-  250-PIPELINING
+<-  250-SIZE 10240000
+<-  250-VRFY
+<-  250-ETRN
+<-  250-STARTTLS
+<-  250-ENHANCEDSTATUSCODES
+<-  250-8BITMIME
+<-  250-DSN
+<-  250-SMTPUTF8
+<-  250 CHUNKING
+ -> MAIL FROM:<fatlum@u8.cyberlab.fhnw.ch>
+<-  250 2.1.0 Ok
+ -> RCPT TO:<reflector@cyberlab.fhnw.ch>
+<-  250 2.1.5 Ok
+ -> DATA
+<-  354 End data with <CR><LF>.<CR><LF>
+ -> Date: Sat, 16 May 2026 16:42:15 +0200
+ -> To: reflector@cyberlab.fhnw.ch
+ -> From: fatlum@u8.cyberlab.fhnw.ch
+ -> Subject: test Sat, 16 May 2026 16:42:15 +0200
+ -> Message-Id: <20260516164215.002654@mail.u8.cyberlab.fhnw.ch>
+ -> X-Mailer: swaks v20240103.0 jetmore.org/john/code/swaks/
+ -> 
+ -> This is a test mailing
+ -> 
+ -> 
+ -> .
+<-  250 2.0.0 Ok: queued as CB7B44074A
+ -> QUIT
+<-  221 2.0.0 Bye
+=== Connection closed with remote host.
+```
+
+Die Mail wurde lokal angenommen und in die Queue gelegt:
+
+```text
+250 2.0.0 Ok: queued as CB7B44074A
+```
+
+Danach prüfen wir im Mail-Log, ob die Mail versendet wurde und ob beim Empfang der Antwort ein SPF-Check durchgeführt wurde:
+
+```bash
+# command
+sudo grep -Ei "CB7B44074A|spf|policyd" /var/log/mail.log | tail -n 80
+
+# response
+2026-05-16T16:42:15.833537+02:00 mail postfix/smtpd[2655]: CB7B44074A: client=localhost[127.0.0.1]
+2026-05-16T16:42:15.834069+02:00 mail postfix/cleanup[2659]: CB7B44074A: message-id=<20260516164215.002654@mail.u8.cyberlab.fhnw.ch>
+2026-05-16T16:42:15.835143+02:00 mail postfix/qmgr[2649]: CB7B44074A: from=<fatlum@u8.cyberlab.fhnw.ch>, size=507, nrcpt=1 (queue active)
+2026-05-16T16:42:16.000960+02:00 mail postfix/smtp[2660]: CB7B44074A: to=<reflector@cyberlab.fhnw.ch>, relay=srvMSG01.cyberlab.fhnw.ch[192.168.64.33]:25, delay=0.17, delays=0/0.01/0.04/0.11, dsn=2.0.0, status=sent (250 2.0.0 Ok: queued as EAA9E601BC)
+2026-05-16T16:42:16.001612+02:00 mail postfix/qmgr[2649]: CB7B44074A: removed
+2026-05-16T16:42:19.248015+02:00 mail postfix/policy-spf[2663]: Policy action=PREPEND Received-SPF: pass (cyberlab.fhnw.ch: 192.168.64.33 is authorized to use 'reflector@cyberlab.fhnw.ch' in 'mfrom' identity (mechanism 'mx' matched)) receiver=u8.cyberlab.fhnw.ch; identity=mailfrom; envelope-from="reflector@cyberlab.fhnw.ch"; helo=srvMSG01.cyberlab.fhnw.ch; client-ip=192.168.64.33
+```
+
+Wichtig ist hier die folgende Stelle:
+
+```text
+Policy action=PREPEND Received-SPF: pass
+```
+
+Das bedeutet, dass der SPF-Policy-Dienst aktiv war und die eingehende Mail vom Reflector erfolgreich geprüft wurde. Die IP-Adresse `192.168.64.33` ist für `cyberlab.fhnw.ch` als sendender Mailserver erlaubt.
+
+Zum Schluss prüfen wir zusätzlich das lokale Postfach:
+
+```bash
+# command
+sudo grep -Ei "Received-SPF|Subject: reflected|From: reflector|Delivered-To:" /var/mail/fatlum | tail -n 30
+
+# response
+Delivered-To: fatlum@u8.cyberlab.fhnw.ch
+Delivered-To: fatlum@u8.cyberlab.fhnw.ch
+Subject: reflected: test Sat, 16 May 2026 16:13:25 +0200
+From: reflector@cyberlab.fhnw.ch
+Delivered-To: fatlum@u8.cyberlab.fhnw.ch
+Received-SPF: pass (cyberlab.fhnw.ch: 192.168.64.33 is authorized to use 'reflector@cyberlab.fhnw.ch' in 'mfrom' identity (mechanism 'mx' matched)) receiver=u8.cyberlab.fhnw.ch; identity=mailfrom; envelope-from="reflector@cyberlab.fhnw.ch"; helo=srvMSG01.cyberlab.fhnw.ch; client-ip=192.168.64.33
+Subject: reflected: test Sat, 16 May 2026 16:42:15 +0200
+From: reflector@cyberlab.fhnw.ch
+```
+
+Auch im lokalen Postfach ist der Header `Received-SPF: pass` sichtbar. Damit ist bestätigt, dass SPF sowohl im DNS veröffentlicht als auch bei eingehenden Mails durch Postfix geprüft wird.
+
+---
 
 ## 5 DKIM
 
