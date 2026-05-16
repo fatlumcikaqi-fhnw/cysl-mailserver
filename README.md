@@ -988,9 +988,373 @@ Damit ist BIND9 korrekt eingerichtet. Forward Lookup, Reverse Lookup und MX Look
 
 ## 3 Mailserver (Postfix)
 
+In diesem Kapitel richten wir Postfix als Mailserver für `u8.cyberlab.fhnw.ch` ein. Danach konfigurieren wir die wichtigsten Hostnamen und testen, ob lokale Mails sowie Mails an den CyberLab-Reflector korrekt gesendet und empfangen werden können.
+
 ### 3.1 Installation
 
+Zuerst prüfen wir, ob Postfix, `swaks` und `rsyslog` bereits installiert sind:
+
+```bash
+# command
+dpkg -l | grep -E "postfix|swaks|rsyslog"
+
+# response
+# keine Ausgabe
+```
+
+Da noch keine der benötigten Komponenten installiert ist, installieren wir Postfix, `swaks` für SMTP-Tests und `rsyslog` für die Mail-Logs:
+
+```bash
+# command
+sudo apt install postfix swaks rsyslog
+```
+
+Während der Installation wird Postfix nach der Grundkonfiguration gefragt. Für diesen Mailserver wählen wir:
+
+```text
+General mail configuration type: Internet Site
+System mail name: u8.cyberlab.fhnw.ch
+```
+
+Falls beim Dialog versehentlich `mail.u8.cyberlab.fhnw.ch` als System-Mail-Name gesetzt wurde, ist das nicht kritisch. Die Werte werden nach der Installation explizit gesetzt.
+
+Nun konfigurieren wir die wichtigsten Postfix-Werte:
+
+```bash
+# command
+sudo postconf -e "myhostname=mail.u8.cyberlab.fhnw.ch" && \
+sudo postconf -e "mydomain=u8.cyberlab.fhnw.ch" && \
+sudo postconf -e "myorigin=/etc/mailname" && \
+sudo postconf -e 'mydestination = $myhostname, $mydomain, localhost.$mydomain, localhost' && \
+echo "u8.cyberlab.fhnw.ch" | sudo tee /etc/mailname && \
+sudo postconf -e "smtpd_banner=mail.u8.cyberlab.fhnw.ch ESMTP Postfix" && \
+sudo postconf -e "inet_protocols=ipv4" && \
+sudo systemctl restart postfix
+
+# response
+u8.cyberlab.fhnw.ch
+```
+
+Danach prüfen wir die gesetzten Werte:
+
+```bash
+# command
+sudo postconf -n | grep -E "^(myhostname|mydomain|myorigin|mydestination|inet_protocols|smtpd_banner)"
+echo "--- /etc/mailname ---"
+cat /etc/mailname
+
+# response
+inet_protocols = ipv4
+mydestination = $myhostname, $mydomain, localhost.$mydomain, localhost
+mydomain = u8.cyberlab.fhnw.ch
+myhostname = mail.u8.cyberlab.fhnw.ch
+myorigin = /etc/mailname
+smtpd_banner = mail.u8.cyberlab.fhnw.ch ESMTP Postfix
+--- /etc/mailname ---
+u8.cyberlab.fhnw.ch
+```
+
+Damit sind die wichtigsten Postfix-Werte korrekt gesetzt. Nun prüfen wir, ob der Dienst läuft:
+
+```bash
+# command
+systemctl status postfix --no-pager
+
+# response
+● postfix.service - Postfix Mail Transport Agent (main/default instance)
+     Loaded: loaded (/usr/lib/systemd/system/postfix.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-05-16 15:56:11 CEST; 1min 12s ago
+ Invocation: 90659742343b4de5ad47ab5b1645c88c
+       Docs: man:postfix(1)
+    Process: 2149 ExecStartPre=postfix check (code=exited, status=0/SUCCESS)
+    Process: 2256 ExecStart=postfix debian-systemd-start (code=exited, status=0/SUCCESS)
+   Main PID: 2265 (master)
+      Tasks: 3 (limit: 4579)
+     Memory: 2.7M (peak: 5.4M)
+        CPU: 130ms
+     CGroup: /system.slice/postfix.service
+             ├─2265 /usr/lib/postfix/sbin/master -w
+             ├─2266 pickup -l -t unix -u -c
+             └─2267 qmgr -l -t unix -u
+```
+
+Zusätzlich setzen wir den System-Hostname passend zum Mailserver:
+
+```bash
+# command
+sudo hostnamectl set-hostname mail.u8.cyberlab.fhnw.ch
+```
+
+Danach prüfen wir den Hostnamen:
+
+```bash
+# command
+sudo hostnamectl
+
+# response
+ Static hostname: mail.u8.cyberlab.fhnw.ch
+       Icon name: computer-vm
+         Chassis: vm 🖴
+      Machine ID: eef94e9b87a14aa3ae2820374ed9b6db
+         Boot ID: c325d19fc54f41e29fde7180d7dace0b
+    Product UUID: a364284e-1fea-4d68-945f-630ff441e506
+    AF_VSOCK CID: 1
+  Virtualization: qemu
+Operating System: Debian GNU/Linux 13 (trixie)        
+          Kernel: Linux 6.12.74+deb13+1-arm64
+    Architecture: arm64
+ Hardware Vendor: QEMU
+  Hardware Model: QEMU Virtual Machine
+Firmware Version: 0.0.0
+   Firmware Date: Fri 2015-02-06
+    Firmware Age: 11y 3month 1w 1d
+```
+
+Der vollständige Hostname wird ebenfalls geprüft:
+
+```bash
+# command
+hostname -f
+
+# response
+mail.u8.cyberlab.fhnw.ch
+```
+
 ### 3.2 Konfiguration und Smoke-Tests
+
+Zuerst testen wir, ob Postfix lokal auf Port 25 erreichbar ist und ob der SMTP-Banner korrekt gesetzt wurde:
+
+```bash
+# command
+nc -v 127.0.0.1 25
+
+# response
+localhost [127.0.0.1] 25 (smtp) open
+220 mail.u8.cyberlab.fhnw.ch ESMTP Postfix
+QUIT
+221 2.0.0 Bye
+```
+
+Mit `nc` prüfen wir, ob Postfix lokal auf Port 25 erreichbar ist und sich mit dem korrekten SMTP-Banner meldet. Der Test wird zuerst über `127.0.0.1` durchgeführt, damit nur der lokale Postfix-Dienst geprüft wird und keine externen Netzwerkfaktoren das Ergebnis beeinflussen.
+
+Der Banner zeigt korrekt `mail.u8.cyberlab.fhnw.ch ESMTP Postfix`.
+
+Danach prüfen wir, ob `rsyslog` läuft, damit Mail-Logs unter `/var/log/mail.log` geschrieben werden:
+
+```bash
+# command
+systemctl status rsyslog --no-pager
+
+# response
+● rsyslog.service - System Logging Service
+     Loaded: loaded (/usr/lib/systemd/system/rsyslog.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-05-16 15:49:58 CEST; 9min ago
+ Invocation: 1815ff23eb7d4d73a746ea32a9b27702
+TriggeredBy: ● syslog.socket
+       Docs: man:rsyslogd(8)
+             man:rsyslog.conf(5)
+             https://www.rsyslog.com/doc/
+   Main PID: 1709 (rsyslogd)
+      Tasks: 4 (limit: 4579)
+     Memory: 968K (peak: 2.3M)
+        CPU: 18ms
+     CGroup: /system.slice/rsyslog.service
+             └─1709 /usr/sbin/rsyslogd -n -iNONE
+```
+
+Die Logdatei ist vorhanden:
+
+```bash
+# command
+ls -l /var/log/mail.log
+
+# response
+-rw-r----- 1 root adm 1335 May 16 15:58 /var/log/mail.log
+```
+
+Nun testen wir zuerst die lokale Mailzustellung. Dazu senden wir eine Mail von `fatlum@u8.cyberlab.fhnw.ch` an denselben Benutzer:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to fatlum@u8.cyberlab.fhnw.ch --server 127.0.0.1
+
+# response
+=== Trying 127.0.0.1:25...
+=== Connected to 127.0.0.1.
+<-  220 mail.u8.cyberlab.fhnw.ch ESMTP Postfix
+ -> EHLO mail.u8.cyberlab.fhnw.ch
+<-  250-mail.u8.cyberlab.fhnw.ch
+<-  250-PIPELINING
+<-  250-SIZE 10240000
+<-  250-VRFY
+<-  250-ETRN
+<-  250-STARTTLS
+<-  250-ENHANCEDSTATUSCODES
+<-  250-8BITMIME
+<-  250-DSN
+<-  250-SMTPUTF8
+<-  250 CHUNKING
+ -> MAIL FROM:<fatlum@u8.cyberlab.fhnw.ch>
+<-  250 2.1.0 Ok
+ -> RCPT TO:<fatlum@u8.cyberlab.fhnw.ch>
+<-  250 2.1.5 Ok
+ -> DATA
+<-  354 End data with <CR><LF>.<CR><LF>
+ -> Date: Sat, 16 May 2026 16:11:48 +0200
+ -> To: fatlum@u8.cyberlab.fhnw.ch
+ -> From: fatlum@u8.cyberlab.fhnw.ch
+ -> Subject: test Sat, 16 May 2026 16:11:48 +0200
+ -> Message-Id: <20260516161148.002311@mail.u8.cyberlab.fhnw.ch>
+ -> X-Mailer: swaks v20240103.0 jetmore.org/john/code/swaks/
+ -> 
+ -> This is a test mailing
+ -> 
+ -> 
+ -> .
+<-  250 2.0.0 Ok: queued as CBFBF407BE
+ -> QUIT
+<-  221 2.0.0 Bye
+=== Connection closed with remote host.
+```
+
+Die Zeile `250 2.0.0 Ok` zeigt, dass Postfix die Mail angenommen hat. Nun prüfen wir die lokale Mailbox:
+
+```bash
+# command
+sudo tail -n 40 /var/mail/fatlum
+
+# response
+From fatlum@u8.cyberlab.fhnw.ch  Sat May 16 16:11:48 2026
+Return-Path: <fatlum@u8.cyberlab.fhnw.ch>
+X-Original-To: fatlum@u8.cyberlab.fhnw.ch
+Delivered-To: fatlum@u8.cyberlab.fhnw.ch
+Received: from mail.u8.cyberlab.fhnw.ch (localhost [127.0.0.1])
+ by mail.u8.cyberlab.fhnw.ch (Postfix) with ESMTP id CBFBF407BE
+ for <fatlum@u8.cyberlab.fhnw.ch>; Sat, 16 May 2026 16:11:48 +0200 (CEST)
+Date: Sat, 16 May 2026 16:11:48 +0200
+To: fatlum@u8.cyberlab.fhnw.ch
+From: fatlum@u8.cyberlab.fhnw.ch
+Subject: test Sat, 16 May 2026 16:11:48 +0200
+Message-Id: <20260516161148.002311@mail.u8.cyberlab.fhnw.ch>
+X-Mailer: swaks v20240103.0 jetmore.org/john/code/swaks/
+
+This is a test mailing
+```
+
+Damit funktioniert die lokale Zustellung.
+
+Als nächstes senden wir eine Testmail an den CyberLab-Reflector:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to reflector@cyberlab.fhnw.ch --server 127.0.0.1
+
+# response
+=== Trying 127.0.0.1:25...
+=== Connected to 127.0.0.1.
+<-  220 mail.u8.cyberlab.fhnw.ch ESMTP Postfix
+ -> EHLO mail.u8.cyberlab.fhnw.ch
+<-  250-mail.u8.cyberlab.fhnw.ch
+<-  250-PIPELINING
+<-  250-SIZE 10240000
+<-  250-VRFY
+<-  250-ETRN
+<-  250-STARTTLS
+<-  250-ENHANCEDSTATUSCODES
+<-  250-8BITMIME
+<-  250-DSN
+<-  250-SMTPUTF8
+<-  250 CHUNKING
+ -> MAIL FROM:<fatlum@u8.cyberlab.fhnw.ch>
+<-  250 2.1.0 Ok
+ -> RCPT TO:<reflector@cyberlab.fhnw.ch>
+<-  250 2.1.5 Ok
+ -> DATA
+<-  354 End data with <CR><LF>.<CR><LF>
+ -> Date: Sat, 16 May 2026 16:13:25 +0200
+ -> To: reflector@cyberlab.fhnw.ch
+ -> From: fatlum@u8.cyberlab.fhnw.ch
+ -> Subject: test Sat, 16 May 2026 16:13:25 +0200
+ -> Message-Id: <20260516161325.002322@mail.u8.cyberlab.fhnw.ch>
+ -> X-Mailer: swaks v20240103.0 jetmore.org/john/code/swaks/
+ -> 
+ -> This is a test mailing
+ -> 
+ -> 
+ -> .
+<-  250 2.0.0 Ok: queued as 21957407BE
+ -> QUIT
+<-  221 2.0.0 Bye
+=== Connection closed with remote host.
+```
+
+Danach prüfen wir im Mail-Log, ob die Mail erfolgreich an den Reflector weitergegeben wurde:
+
+```bash
+# command
+sudo grep "21957407BE" /var/log/mail.log
+
+# response
+2026-05-16T16:13:25.137663+02:00 mail postfix/smtpd[2312]: 21957407BE: client=localhost[127.0.0.1]
+2026-05-16T16:13:25.138386+02:00 mail postfix/cleanup[2315]: 21957407BE: message-id=<20260516161325.002322@mail.u8.cyberlab.fhnw.ch>
+2026-05-16T16:13:25.140503+02:00 mail postfix/qmgr[2267]: 21957407BE: from=<fatlum@u8.cyberlab.fhnw.ch>, size=507, nrcpt=1 (queue active)
+2026-05-16T16:13:26.396352+02:00 mail postfix/smtp[2323]: 21957407BE: to=<reflector@cyberlab.fhnw.ch>, relay=srvMSG01.cyberlab.fhnw.ch[192.168.64.33]:25, delay=1.3, delays=0/0.01/1/0.23, dsn=2.0.0, status=sent (250 2.0.0 Ok: queued as 56285601BC)
+2026-05-16T16:13:26.397062+02:00 mail postfix/qmgr[2267]: 21957407BE: removed
+```
+
+Die wichtige Stelle ist `status=sent`. Damit wurde die Mail erfolgreich an `srvMSG01.cyberlab.fhnw.ch` übergeben.
+
+Nun prüfen wir, ob die Antwort des Reflectors angekommen ist:
+
+```bash
+# command
+sudo tail -n 80 /var/mail/fatlum
+
+# response
+From reflector@cyberlab.fhnw.ch  Sat May 16 16:13:37 2026
+Return-Path: <reflector@cyberlab.fhnw.ch>
+X-Original-To: fatlum@u8.cyberlab.fhnw.ch
+Delivered-To: fatlum@u8.cyberlab.fhnw.ch
+Received: from srvMSG01.cyberlab.fhnw.ch (srvMSG01.cyberlab.fhnw.ch [192.168.64.33])
+ by mail.u8.cyberlab.fhnw.ch (Postfix) with ESMTP id 53A90407BE
+ for <fatlum@u8.cyberlab.fhnw.ch>; Sat, 16 May 2026 16:13:37 +0200 (CEST)
+Received: from localhost (localhost [127.0.0.1])
+ by srvMSG01.cyberlab.fhnw.ch (Postfix) with ESMTP id 3E433601BC
+ for <fatlum@u8.cyberlab.fhnw.ch>; Sat, 16 May 2026 16:13:37 +0200 (CEST)
+Received: from srvMSG01.cyberlab.fhnw.ch ([IPv6:::1])
+ by localhost (srvmsg01.cyberlab.fhnw.ch [IPv6:::1]) (amavisd-new, port 10024)
+ with ESMTP id cjBiVvA_9vEG for <fatlum@u8.cyberlab.fhnw.ch>;
+ Sat, 16 May 2026 16:13:35 +0200 (CEST)
+Received: by srvMSG01.cyberlab.fhnw.ch (Postfix, from userid 1001)
+ id 9162E604FF; Sat, 16 May 2026 16:13:34 +0200 (CEST)
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="1804289383-1778940814=:1112176"
+Subject: reflected: test Sat, 16 May 2026 16:13:25 +0200
+To: <fatlum@cyberlab.fhnw.ch>
+User-Agent: mail (GNU Mailutils 3.14)
+Date: Sat, 16 May 2026 16:13:34 +0200
+Message-Id: <20260516141334.9162E604FF@srvMSG01.cyberlab.fhnw.ch>
+From: reflector@cyberlab.fhnw.ch
+
+This is a message from reflector
+I received the attached mail
+73
+reflector aka god
+```
+
+Die Antwort des Reflectors ist in der lokalen Mailbox angekommen. Damit ist bestätigt, dass der Mailserver Mails senden und empfangen kann.
+
+Zum Schluss prüfen wir, ob die Mailqueue leer ist:
+
+```bash
+# command
+mailq
+
+# response
+Mail queue is empty
+```
+
+Damit ist die Postfix-Grundkonfiguration erfolgreich abgeschlossen.
 
 ---
 
