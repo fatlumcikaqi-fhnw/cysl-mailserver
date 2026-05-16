@@ -1,5 +1,3 @@
-<!-- markdownlint-disable-file MD033 -->
-
 # Mailserver-Dokumentation CyberLab
 
 Diese Dokumentation beschreibt den Aufbau eines abgesicherten Mailservers für die Domain `u8.cyberlab.fhnw.ch`. Der Server wurde in einer Debian-13-VM betrieben und schrittweise mit DNS, Postfix, SPF und weiteren Mail-Sicherheitsmechanismen erweitert.
@@ -21,7 +19,7 @@ Benutzer: fatlum
 
 Die Debian-Netinstall-ISO ist über die offizielle Debian-Webseite verfügbar:
 
-<https://www.debian.org/releases/trixie/debian-installer/>
+[https://www.debian.org/releases/trixie/debian-installer/](https://www.debian.org/releases/trixie/debian-installer/)
 
 Nach der Installation wurde die VM gestartet und die IP-Adresse mit `ip a` geprüft, damit der Zugriff per SSH möglich ist.
 
@@ -863,11 +861,383 @@ Damit ist bestätigt, dass SPF sowohl im DNS veröffentlicht als auch bei eingeh
 
 ## 5 DKIM
 
+In diesem Kapitel wird DKIM (DomainKeys Identified Mail) für `u8.cyberlab.fhnw.ch` eingerichtet. DKIM signiert ausgehende E-Mails kryptografisch, damit empfangende Mailserver prüfen können, ob die Mail wirklich von unserer Domain stammt und unterwegs nicht verändert wurde.
+
+Dafür wird OpenDKIM installiert, mit Postfix über einen Milter verbunden und ein öffentlicher DKIM-Schlüssel als DNS-TXT-Record veröffentlicht. Anschliessend wird geprüft, ob ausgehende Mails korrekt signiert und vom CyberLab-Reflector erfolgreich verifiziert werden.
+
 ### 5.1 OpenDKIM und Postfix (Milter)
+
+Zuerst wurde geprüft, ob OpenDKIM bereits installiert ist:
+
+```bash
+# command
+dpkg -l | grep -E "^ii\s+opendkim|^ii\s+opendkim-tools" || true
+
+# response
+# keine Ausgabe
+```
+
+Da OpenDKIM noch nicht installiert war, wurden die benötigten Pakete installiert:
+
+```bash
+# command
+sudo apt install -y opendkim opendkim-tools
+```
+
+Danach wurde geprüft, ob der Dienst läuft:
+
+```bash
+# command
+systemctl is-active opendkim
+
+# response
+active
+```
+
+Anschliessend wurde die OpenDKIM-Konfiguration geprüft:
+
+```bash
+# command
+sudo grep -nE "^(#)?(Mode|Socket|KeyTable|SigningTable|ExternalIgnoreList|InternalHosts|Syslog|UserID)" /etc/opendkim.conf /etc/default/opendkim 2>/dev/null
+```
+
+Relevante Ausgabe:
+
+```text
+/etc/opendkim.conf:14:#Mode          sv
+/etc/opendkim.conf:30:UserID         opendkim
+/etc/opendkim.conf:37:Socket         local:/run/opendkim/opendkim.sock
+/etc/opendkim.conf:46:#InternalHosts 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12
+```
+
+Die Standardkonfiguration verwendet noch einen lokalen Socket. Für die Anbindung an Postfix wurde OpenDKIM so konfiguriert, dass es über `inet:12301@localhost` erreichbar ist. Zusätzlich wurden Tabellen für Schlüssel, Signaturen und vertrauenswürdige Hosts eingebunden.
+
+```bash
+# command
+sudo nano /etc/opendkim.conf
+```
+
+Relevante Konfiguration:
+
+```text
+Mode            sv
+Socket          inet:12301@localhost
+KeyTable        refile:/etc/opendkim/KeyTable
+SigningTable    refile:/etc/opendkim/SigningTable
+ExternalIgnoreList refile:/etc/opendkim/TrustedHosts
+InternalHosts   refile:/etc/opendkim/TrustedHosts
+```
+
+Prüfung:
+
+```bash
+# command
+sudo grep -nE "^(Mode|Socket|KeyTable|SigningTable|ExternalIgnoreList|InternalHosts)" /etc/opendkim.conf
+
+# response
+47:Mode            sv
+48:Socket          inet:12301@localhost
+49:KeyTable        refile:/etc/opendkim/KeyTable
+50:SigningTable    refile:/etc/opendkim/SigningTable
+51:ExternalIgnoreList refile:/etc/opendkim/TrustedHosts
+52:InternalHosts   refile:/etc/opendkim/TrustedHosts
+```
+
+Danach wurde ein Verzeichnis für die DKIM-Schlüssel erstellt:
+
+```bash
+# command
+sudo mkdir -p /etc/opendkim/keys/u8.cyberlab.fhnw.ch
+```
+
+Der DKIM-Schlüssel wurde mit dem Selector `default` für die Domain `u8.cyberlab.fhnw.ch` erzeugt:
+
+```bash
+# command
+sudo opendkim-genkey -b 2048 -s default -d u8.cyberlab.fhnw.ch -D /etc/opendkim/keys/u8.cyberlab.fhnw.ch
+```
+
+Danach wurden Besitzer und Berechtigungen gesetzt:
+
+```bash
+# command
+sudo chown -R opendkim:opendkim /etc/opendkim/keys
+sudo chmod 700 /etc/opendkim/keys
+sudo chmod 700 /etc/opendkim/keys/u8.cyberlab.fhnw.ch
+sudo chmod 600 /etc/opendkim/keys/u8.cyberlab.fhnw.ch/default.private
+```
+
+Prüfung:
+
+```bash
+# command
+sudo ls -l /etc/opendkim/keys/u8.cyberlab.fhnw.ch
+
+# response
+-rw------- 1 opendkim opendkim 1704 May 16 17:51 default.private
+-rw------- 1 opendkim opendkim  515 May 16 17:51 default.txt
+```
+
+Die Datei `default.private` enthält den privaten Schlüssel und bleibt lokal auf dem Server. Die Datei `default.txt` enthält den öffentlichen DNS-TXT-Record.
+
+Nun wurden die OpenDKIM-Tabellen erstellt.
+
+```bash
+# command
+sudo nano /etc/opendkim/KeyTable
+```
+
+Inhalt:
+
+```text
+default._domainkey.u8.cyberlab.fhnw.ch u8.cyberlab.fhnw.ch:default:/etc/opendkim/keys/u8.cyberlab.fhnw.ch/default.private
+```
+
+```bash
+# command
+sudo nano /etc/opendkim/SigningTable
+```
+
+Inhalt:
+
+```text
+*@u8.cyberlab.fhnw.ch default._domainkey.u8.cyberlab.fhnw.ch
+```
+
+```bash
+# command
+sudo nano /etc/opendkim/TrustedHosts
+```
+
+Inhalt:
+
+```text
+127.0.0.1
+localhost
+192.168.97.64
+mail.u8.cyberlab.fhnw.ch
+u8.cyberlab.fhnw.ch
+```
+
+Danach wurden Besitzer und Berechtigungen gesetzt:
+
+```bash
+# command
+sudo chown opendkim:opendkim /etc/opendkim/KeyTable
+sudo chown opendkim:opendkim /etc/opendkim/SigningTable
+sudo chown opendkim:opendkim /etc/opendkim/TrustedHosts
+sudo chmod 644 /etc/opendkim/KeyTable
+sudo chmod 644 /etc/opendkim/SigningTable
+sudo chmod 644 /etc/opendkim/TrustedHosts
+```
+
+Anschliessend wurde geprüft, ob Postfix bereits Milter-Einstellungen besitzt:
+
+```bash
+# command
+sudo postconf -n | grep -E "^(milter_protocol|milter_default_action|smtpd_milters|non_smtpd_milters)"
+
+# response
+# keine Ausgabe
+```
+
+Da noch keine Milter konfiguriert waren, wurde OpenDKIM in Postfix eingebunden:
+
+```bash
+# command
+sudo postconf -e "milter_protocol = 6"
+sudo postconf -e "milter_default_action = accept"
+sudo postconf -e "smtpd_milters = inet:localhost:12301"
+sudo postconf -e "non_smtpd_milters = inet:localhost:12301"
+```
+
+Prüfung:
+
+```bash
+# command
+sudo postconf -n | grep -E "^(milter_protocol|milter_default_action|smtpd_milters|non_smtpd_milters)"
+
+# response
+milter_default_action = accept
+milter_protocol = 6
+non_smtpd_milters = inet:localhost:12301
+smtpd_milters = inet:localhost:12301
+```
+
+Zum Schluss wurden OpenDKIM und Postfix neu gestartet:
+
+```bash
+# command
+sudo systemctl restart opendkim
+sudo systemctl restart postfix
+```
+
+Kontrolle:
+
+```bash
+# command
+systemctl is-active opendkim
+systemctl is-active postfix
+
+# response
+active
+active
+```
+
+Damit ist OpenDKIM eingerichtet und als Milter mit Postfix verbunden.
 
 ### 5.2 DKIM-Schlüssel in der DNS-Zone
 
+Damit andere Mailserver die DKIM-Signatur prüfen können, muss der öffentliche DKIM-Schlüssel als DNS-TXT-Record veröffentlicht werden. Der öffentliche Record befindet sich in der Datei `default.txt`.
+
+```bash
+# command
+sudo cat /etc/opendkim/keys/u8.cyberlab.fhnw.ch/default.txt
+```
+
+Relevante Ausgabe:
+
+```text
+default._domainkey IN TXT ( "v=DKIM1; h=sha256; k=rsa; "
+    "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A..."
+) ; ----- DKIM key default for u8.cyberlab.fhnw.ch
+```
+
+Der Record wird in die Forward-Zone eingefügt. Vor der Änderung wird die Serial im SOA-Record von `2026051602` auf `2026051603` erhöht, damit BIND die neue Zonenversion erkennt.
+
+```bash
+# command
+sudo nano /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+```
+
+Relevante Änderung:
+
+```dns
+@    IN TXT "v=spf1 mx -all"
+
+; DKIM
+default._domainkey IN TXT ( "v=DKIM1; h=sha256; k=rsa; "
+    "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A..."
+) ; ----- DKIM key default for u8.cyberlab.fhnw.ch
+```
+
+Die Serial im SOA-Record wurde ebenfalls erhöht:
+
+```dns
+2026051603 ; serial
+```
+
+Danach wurde die Zone geprüft:
+
+```bash
+# command
+sudo named-checkzone u8.cyberlab.fhnw.ch /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+
+# response
+zone u8.cyberlab.fhnw.ch/IN: loaded serial 2026051603
+OK
+```
+
+Anschliessend wurde BIND neu geladen:
+
+```bash
+# command
+sudo rndc reload
+
+# response
+server reload successful
+```
+
+Danach wurde geprüft, ob der DKIM-TXT-Record über DNS sichtbar ist:
+
+```bash
+# command
+dig default._domainkey.u8.cyberlab.fhnw.ch TXT +short
+```
+
+Relevante Ausgabe:
+
+```text
+"v=DKIM1; h=sha256; k=rsa; " "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A..."
+```
+
+Dass der TXT-Record in mehrere Anführungszeichen-Blöcke aufgeteilt wird, ist normal bei langen DNS-TXT-Records.
+
+Zusätzlich wurde geprüft, ob OpenDKIM den privaten Schlüssel mit dem öffentlichen DNS-Record abgleichen kann:
+
+```bash
+# command
+sudo opendkim-testkey -d u8.cyberlab.fhnw.ch -s default -vvv
+
+# response
+opendkim-testkey: using default configfile /etc/opendkim.conf
+opendkim-testkey: checking key 'default._domainkey.u8.cyberlab.fhnw.ch'
+opendkim-testkey: key not secure
+opendkim-testkey: key OK
+```
+
+Die Ausgabe `key OK` zeigt, dass privater Schlüssel und DNS-Record zusammenpassen. Die Meldung `key not secure` bedeutet nur, dass der DNS-Record zu diesem Zeitpunkt noch nicht durch DNSSEC abgesichert ist. DNSSEC wird später separat eingerichtet.
+
 ### 5.3 Tests
+
+Zum Testen wurde eine Mail an den CyberLab-Reflector gesendet:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to reflector@cyberlab.fhnw.ch --server 127.0.0.1
+```
+
+Relevante Ausgabe:
+
+```text
+250 2.0.0 Ok: queued as A56CB4076E
+```
+
+Danach wurde im Mail-Log geprüft, ob OpenDKIM die Mail signiert hat:
+
+```bash
+# command
+sudo grep -Ei "A56CB4076E|dkim|opendkim" /var/log/mail.log | tail -n 80
+```
+
+Relevante Ausgabe:
+
+```text
+opendkim[3233]: A56CB4076E: DKIM-Signature field added (s=default, d=u8.cyberlab.fhnw.ch)
+postfix/smtp[3279]: A56CB4076E: to=<reflector@cyberlab.fhnw.ch>, relay=srvMSG01.cyberlab.fhnw.ch[192.168.64.33]:25, dsn=2.0.0, status=sent
+```
+
+Die Zeile `DKIM-Signature field added` zeigt, dass OpenDKIM die ausgehende Mail erfolgreich signiert hat.
+
+In der zurückgesendeten Reflector-Mail wurde zusätzlich geprüft, ob die DKIM-Signatur vom CyberLab-Mailserver akzeptiert wurde.
+
+```bash
+# command
+sudo grep -Ei "Authentication-Results|DKIM-Signature|Received-SPF|Subject: reflected|From: reflector" /var/mail/fatlum | tail -n 20
+```
+
+Relevante Ausgabe:
+
+```text
+From: reflector@cyberlab.fhnw.ch
+Subject: reflected: test Sat, 16 May 2026 17:59:23 +0200
+Authentication-Results: srvmsg01.cyberlab.fhnw.ch (amavisd-new); dkim=pass (2048-bit key) header.d=u8.cyberlab.fhnw.ch
+DKIM-Signature: v=1; a=rsa-sha256; d=u8.cyberlab.fhnw.ch; s=default;
+```
+
+Die Ausgabe `dkim=pass` bestätigt, dass die DKIM-Signatur erfolgreich geprüft wurde.
+
+Zum Schluss wurde kontrolliert, ob keine Mail mehr in der Queue hängt:
+
+```bash
+# command
+mailq
+
+# response
+Mail queue is empty
+```
+
+Damit ist DKIM erfolgreich eingerichtet. Ausgehende Mails werden durch OpenDKIM signiert und die Signatur kann über den veröffentlichten DNS-TXT-Record geprüft werden.
 
 ---
 
