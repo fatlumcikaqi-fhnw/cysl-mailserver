@@ -319,12 +319,35 @@ auto lo
 iface lo inet loopback
 ```
 
-Danach stoppen wir den alten `ifup`-Dienst für das Interface und entfernen die durch DHCP gesetzte Adresse:
+Danach stoppen wir den alten `ifup`-Dienst für das Interface und beenden den DHCP-Client:
 
 ```bash
 sudo systemctl stop ifup@enp0s1.service
 sudo pkill dhcpcd
+```
+
+Anschließend prüfen wir erneut die IP-Adressen des Interfaces:
+
+```bash
+ip a
+ip route
+```
+
+Falls neben der statischen Adresse `192.168.97.64/22` noch eine zusätzliche dynamische Adresse vorhanden ist, entfernen wir genau diese DHCP-Adresse. In unserem Fall war dies `192.168.97.168/22`:
+
+```bash
 sudo ip addr del 192.168.97.168/22 dev enp0s1
+```
+
+Bei einer anderen Installation kann die dynamische Adresse abweichen. Dann muss statt `192.168.97.168/22` die tatsächlich angezeigte DHCP-Adresse verwendet werden:
+
+```bash
+sudo ip addr del <DHCP-IP>/22 dev enp0s1
+```
+
+Danach laden wir die statische Netzwerkkonfiguration neu:
+
+```bash
 sudo systemctl restart systemd-networkd
 ```
 
