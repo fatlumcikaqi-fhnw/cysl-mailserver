@@ -298,6 +298,8 @@ Keine Ausgabe bedeutet, dass die Konfiguration syntaktisch korrekt ist.
 
 Die Forward-Zone bildet Hostnamen auf IP-Adressen ab.
 
+Da die Delegation in Kapitel 1.2 sowohl `ns1` als auch `ns2` vorsieht, werden beide Nameserver in der Zone eingetragen. Zusätzlich erhält `ns2` einen eigenen A-Record auf `192.168.97.65`.
+
 ```bash
 # command
 sudo nano /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
@@ -317,9 +319,11 @@ $TTL 86400
 
 ; Nameserver
 @    IN NS ns1.u8.cyberlab.fhnw.ch.
+@    IN NS ns2.u8.cyberlab.fhnw.ch.
 
 ; Hosts
 ns1  IN A 192.168.97.64
+ns2  IN A 192.168.97.65
 mail IN A 192.168.97.64
 
 ; Mail exchange
@@ -341,6 +345,8 @@ OK
 
 Die Reverse-Zone bildet die IP-Adresse zurück auf den Hostnamen ab.
 
+Auch in der Reverse-Zone werden beide autoritativen Nameserver eingetragen, damit Forward- und Reverse-Zone dieselbe Nameserver-Struktur veröffentlichen.
+
 ```bash
 # command
 sudo nano /var/lib/bind/u8.cyberlab.fhnw.ch/reverse.db
@@ -360,6 +366,7 @@ $TTL 86400
 
 ; Nameserver
 @   IN NS ns1.u8.cyberlab.fhnw.ch.
+@   IN NS ns2.u8.cyberlab.fhnw.ch.
 
 ; PTR Records
 64  IN PTR mail.u8.cyberlab.fhnw.ch.
@@ -386,6 +393,38 @@ sudo systemctl restart bind9
 ### 2.5 Tests
 
 Die DNS-Funktion wurde lokal und über den CyberLab-DNS getestet.
+
+Die autoritativen Nameserver der Forward-Zone wurden geprüft:
+
+```bash
+# command
+dig @127.0.0.1 u8.cyberlab.fhnw.ch NS +short
+
+# response
+ns1.u8.cyberlab.fhnw.ch.
+ns2.u8.cyberlab.fhnw.ch.
+```
+
+Der zusätzliche A-Record für `ns2` wurde ebenfalls geprüft:
+
+```bash
+# command
+dig @127.0.0.1 ns2.u8.cyberlab.fhnw.ch A +short
+
+# response
+192.168.97.65
+```
+
+Die Nameserver der Reverse-Zone wurden ebenfalls geprüft:
+
+```bash
+# command
+dig @127.0.0.1 64/29.97.168.192.in-addr.arpa NS +short
+
+# response
+ns1.u8.cyberlab.fhnw.ch.
+ns2.u8.cyberlab.fhnw.ch.
+```
 
 Forward Lookup über den lokalen BIND-Server:
 
