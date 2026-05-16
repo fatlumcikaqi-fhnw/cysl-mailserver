@@ -275,7 +275,7 @@ DNS=192.168.64.11
 
 **Hinweis zur Netzmaske:** Wir verwenden hier `/22`, um mit der gesamten CyberLab-Infrastruktur kommunizieren zu können, obwohl wir DNS-technisch später nur für ein `/29`-Subnetz verantwortlich sind.
 
-Damit die Konfiguration greift, wechseln wir den Network-Manager. **Achtung:** Dies unterbricht bestehende SSH-Verbindungen.
+Damit die Konfiguration greift, wechseln wir von der alten ifupdown/DHCP-Konfiguration zu `systemd-networkd`. **Achtung:** Dies unterbricht bestehende SSH-Verbindungen.
 
 ```bash
 # Altes System deaktivieren
@@ -286,6 +286,63 @@ sudo systemctl disable networking
 sudo systemctl enable systemd-networkd
 sudo systemctl restart systemd-networkd
 ```
+
+#### Fehlerbehebung: Alte DHCP-Konfiguration entfernen
+
+Nach der Umstellung auf `systemd-networkd` prüfen wir, ob das Interface wirklich nur noch statisch verwaltet wird:
+
+```bash
+ip a
+ip route
+ps aux | grep -E "dhcpcd|dhclient|NetworkManager|systemd-networkd" | grep -v grep
+````
+
+Falls zusätzlich zur statischen Adresse `192.168.97.64` noch eine dynamische Adresse erscheint, wird das Interface wahrscheinlich noch über die alte Datei `/etc/network/interfaces` per DHCP gestartet. In unserem Fall war dort noch folgende Konfiguration vorhanden:
+
+```text
+allow-hotplug enp0s1
+iface enp0s1 inet dhcp
+```
+
+Diese DHCP-Konfiguration muss entfernt werden, damit `enp0s1` nur noch durch `systemd-networkd` verwaltet wird.
+
+```bash
+sudo nano /etc/network/interfaces
+```
+
+Die Datei sollte danach nur noch die Loopback-Konfiguration enthalten:
+
+```text
+source /etc/network/interfaces.d/*
+
+auto lo
+iface lo inet loopback
+```
+
+Danach stoppen wir den alten `ifup`-Dienst für das Interface und entfernen die durch DHCP gesetzte Adresse:
+
+```bash
+sudo systemctl stop ifup@enp0s1.service
+sudo pkill dhcpcd
+sudo ip addr del 192.168.97.168/22 dev enp0s1
+sudo systemctl restart systemd-networkd
+```
+
+**Hinweis:** Dieser Schritt kann eine bestehende SSH-Verbindung kurz unterbrechen, da die Netzwerkkonfiguration neu geladen wird. Danach kann man sich wieder über die statische Adresse verbinden:
+
+```bash
+ssh fatlum@192.168.97.64
+```
+
+Zum Schluss prüfen wir, ob nur noch `systemd-networkd` aktiv ist:
+
+```bash
+ip a
+ip route
+ps aux | grep -E "dhcpcd|dhclient|NetworkManager|systemd-networkd" | grep -v grep
+```
+
+Der Zielzustand ist, dass `enp0s1` nur noch die statische IPv4-Adresse `192.168.97.64/22` besitzt und keine DHCP-Route mehr vorhanden ist.
 
 #### Fehlerbehebung: Namensauflösung (systemd-resolved)
 
