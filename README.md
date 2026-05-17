@@ -1608,7 +1608,7 @@ sudo grep -i 'opendmarc' /var/log/mail.log | tail -n 10
 2026-05-17T15:12:18.383250+02:00 mail opendmarc[1753]: 4B8BB4001C: cyberlab.fhnw.ch pass
 ```
 
-Die Zeile mit `cyberlab.fhnw.ch pass` zeigt, dass OpenDMARC eine eingehende Mail geprüft hat und die DMARC-Prüfung erfolgreich war.
+Die Zeile zeigt, dass OpenDMARC die eingehende Antwort des CyberLab-Reflectors geprüft hat. Das erkennt man an `header.from=cyberlab.fhnw.ch`. Der Wert `p=reject` stammt deshalb von der DMARC-Policy der Domain `cyberlab.fhnw.ch` und nicht von unserer eigenen Domain. Unsere eigene DMARC-Policy bleibt weiterhin `p=none`, wie der vorherige DNS-Test zeigt.
 
 Zusätzlich wurden die Mail-Header der empfangenen Mail geprüft:
 
@@ -1660,13 +1660,445 @@ Damit ist DMARC erfolgreich eingerichtet und getestet. Der Mailserver veröffent
 
 ## 7 Virenscan (Amavis, ClamAV)
 
+In diesem Kapitel wird ein Virenscan für eingehende und ausgehende E-Mails eingerichtet. Dafür wird Amavis als Content-Filter zwischen Postfix und der eigentlichen Zustellung eingebunden. ClamAV übernimmt dabei die Erkennung von Viren und Malware.
+
+Die Mailverarbeitung läuft danach vereinfacht so ab: Postfix nimmt eine Mail an, leitet sie an Amavis weiter, Amavis prüft sie mit ClamAV und gibt saubere Mails wieder an Postfix zurück.
+
 ### 7.1 Installation
+
+Zuerst wurden Amavis und ClamAV installiert:
+
+```bash
+# command
+sudo apt-get install -y amavisd-new clamav clamav-daemon clamav-freshclam
+```
+
+Danach wurde der automatische Freshclam-Dienst kurz gestoppt, damit die Signaturdatenbank manuell aktualisiert werden kann:
+
+```bash
+# command
+sudo systemctl stop clamav-freshclam
+```
+
+Die ClamAV-Signaturen wurden aktualisiert:
+
+```bash
+# command
+sudo freshclam
+```
+
+Relevante Ausgabe:
+
+```text
+ClamAV update process started
+daily.cvd database is up-to-date
+main.cvd database is up-to-date
+bytecode.cvd database is up-to-date
+```
+
+Danach wurde der Freshclam-Dienst wieder gestartet:
+
+```bash
+# command
+sudo systemctl start clamav-freshclam
+```
+
+Der ClamAV-Daemon wurde anschliessend neu gestartet:
+
+```bash
+# command
+sudo systemctl restart clamav-daemon
+```
+
+Damit sind Amavis und ClamAV installiert und die Virensignaturen aktuell.
 
 ### 7.2 Grundkonfiguration
 
+Damit ClamAV auf die temporären Dateien von Amavis zugreifen kann, wurde der Benutzer `clamav` zur Gruppe `amavis` hinzugefügt:
+
+```bash
+# command
+sudo adduser clamav amavis
+```
+
+Danach wurde die Amavis-Konfigurationsdatei für Content-Filter gesichert und geöffnet:
+
+```bash
+# command
+sudo cp /etc/amavis/conf.d/15-content_filter_mode /etc/amavis/conf.d/15-content_filter_mode.bak-before-virus
+sudo nano /etc/amavis/conf.d/15-content_filter_mode
+```
+
+In dieser Datei wurde der Virus-Block aktiviert:
+
+```perl
+@bypass_virus_checks_maps = (
+   \%bypass_virus_checks, \@bypass_virus_checks_acl, \$bypass_virus_checks_re);
+```
+
+Der Spam-Block wurde in diesem Schritt noch nicht aktiviert, da hier zuerst nur der Virenscan eingerichtet wird.
+
+Danach wurde der Amavis-Hostname gesetzt. Dafür wurde zuerst die Datei gesichert und geöffnet:
+
+```bash
+# command
+sudo cp /etc/amavis/conf.d/05-node_id /etc/amavis/conf.d/05-node_id.bak-before-virus
+sudo nano /etc/amavis/conf.d/05-node_id
+```
+
+Die automatische Hostname-Ermittlung wurde auskommentiert:
+
+```perl
+# chomp($myhostname = `hostname --fqdn`);
+```
+
+Darunter wurde der korrekte Mailserver-Hostname gesetzt:
+
+```perl
+$myhostname = "mail.u8.cyberlab.fhnw.ch";
+```
+
+Danach wurden ClamAV und Amavis neu gestartet:
+
+```bash
+# command
+sudo systemctl restart clamav-daemon amavis
+```
+
+Kontrolle:
+
+```bash
+# command
+systemctl is-active clamav-daemon amavis
+
+# response
+active
+active
+```
+
+Damit laufen ClamAV und Amavis korrekt.
+
 ### 7.3 Anbindung an Postfix
 
+Damit Postfix Mails an Amavis weiterleitet, wurde zuerst die Postfix-`master.cf` gesichert und geöffnet:
+
+```bash
+# command
+sudo cp /etc/postfix/master.cf /etc/postfix/master.cf.bak-before-amavis
+sudo nano /etc/postfix/master.cf
+```
+
+Am Ende der Datei wurde folgender Block ergänzt:
+
+```text
+smtp-amavis unix -    -    -    -    2    smtp
+    -o smtp_data_done_timeout=1200
+    -o smtp_send_xforward_command=yes
+    -o smtp_dns_support_level=disabled
+    -o max_use=20
+
+127.0.0.1:10025 inet n    -    -    -    -    smtpd
+    -o content_filter=
+    -o smtpd_milters=
+    -o local_recipient_maps=
+    -o relay_recipient_maps=
+    -o smtpd_restriction_classes=
+    -o smtpd_delay_reject=no
+    -o smtpd_client_restrictions=permit_mynetworks,reject
+    -o smtpd_helo_restrictions=
+    -o smtpd_sender_restrictions=
+    -o smtpd_recipient_restrictions=permit_mynetworks,reject
+    -o smtpd_data_restrictions=reject_unauth_pipelining
+    -o smtpd_end_of_data_restrictions=
+    -o mynetworks=127.0.0.0/8
+    -o smtpd_error_sleep_time=0
+    -o smtpd_soft_error_limit=1001
+    -o smtpd_hard_error_limit=1000
+    -o smtpd_client_connection_count_limit=0
+    -o smtpd_client_connection_rate_limit=0
+    -o receive_override_options=no_unknown_recipient_checks,no_header_body_checks
+```
+
+Der erste Block definiert den Transport von Postfix zu Amavis auf Port `10024`. Der zweite Block definiert den Rückkanal von Amavis zurück zu Postfix auf Port `10025`.
+
+Danach wurde in Postfix der Content-Filter aktiviert:
+
+```bash
+# command
+sudo postconf -e "content_filter = smtp-amavis:[127.0.0.1]:10024"
+```
+
+Kontrolle:
+
+```bash
+# command
+sudo postconf -n content_filter
+
+# response
+content_filter = smtp-amavis:[127.0.0.1]:10024
+```
+
+Bei der Kontrolle erschien zuerst folgende Warnung:
+
+```text
+postconf: warning: /etc/postfix/master.cf: support for parameter "disable_dns_lookups" will be removed; instead, specify "smtp_dns_support_level"
+```
+
+Deshalb wurde in `/etc/postfix/master.cf` im `smtp-amavis`-Block diese alte Zeile ersetzt:
+
+```text
+-o disable_dns_lookups=yes
+```
+
+durch:
+
+```text
+-o smtp_dns_support_level=disabled
+```
+
+Danach wurde die Postfix-Konfiguration geprüft:
+
+```bash
+# command
+sudo postfix check
+```
+
+Dabei erschien folgende Warnung:
+
+```text
+postfix/postfix-script: warning: not owned by root: /var/spool/postfix/etc/resolv.conf
+```
+
+Die Datei wurde geprüft:
+
+```bash
+# command
+ls -l /var/spool/postfix/etc/resolv.conf
+
+# response
+-rw-r--r-- 1 systemd-resolve systemd-resolve ... /var/spool/postfix/etc/resolv.conf
+```
+
+Der Besitzer wurde korrigiert:
+
+```bash
+# command
+sudo chown root:root /var/spool/postfix/etc/resolv.conf
+```
+
+Danach war `postfix check` sauber:
+
+```bash
+# command
+sudo postfix check
+```
+
+Postfix und Amavis wurden neu gestartet:
+
+```bash
+# command
+sudo systemctl restart postfix amavis
+```
+
+Danach wurde geprüft, ob die Ports korrekt geöffnet sind:
+
+```bash
+# command
+sudo ss -ltnp | grep -E ':10024|:10025'
+```
+
+Relevante Ausgabe:
+
+```text
+127.0.0.1:10025 users:(("master",...))
+127.0.0.1:10024 users:(("/usr/sbin/amavi",...))
+[::1]:10024 users:(("/usr/sbin/amavi",...))
+```
+
+Damit ist Postfix korrekt mit Amavis verbunden.
+
 ### 7.4 Tests und DKIM-Reihenfolge
+
+Zuerst wurde eine saubere Testmail lokal versendet:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to fatlum@u8.cyberlab.fhnw.ch --server 127.0.0.1 --header "Subject: Amavis clean test" --body "clean test" >/dev/null
+```
+
+Danach wurde im Mail-Log geprüft, ob Amavis die Mail verarbeitet hat:
+
+```bash
+# command
+sudo grep -Ei "amavis|Amavis clean test|Passed CLEAN" /var/log/mail.log | tail -n 30
+```
+
+Relevante Ausgabe:
+
+```text
+Using primary internal av scanner code for ClamAV-clamd
+Found secondary av scanner ClamAV-clamscan at /usr/bin/clamscan
+Passed CLEAN
+```
+
+Die Ausgabe `Passed CLEAN` zeigt, dass Amavis die Mail geprüft und als sauber weitergeleitet hat.
+
+Danach wurde eine EICAR-Testdatei erstellt. EICAR ist keine echte Malware, sondern eine harmlose Testsignatur für Virenscanner.
+
+```bash
+# command
+cat > /tmp/eicar.txt <<'EOF'
+X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*
+EOF
+```
+
+Die EICAR-Datei wurde als Anhang verschickt:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to fatlum@u8.cyberlab.fhnw.ch --server 127.0.0.1 --header "Subject: EICAR virus test" --attach @/tmp/eicar.txt 2>&1 | grep -Ei "queued|reject|virus|eicar|250|554"
+```
+
+Relevante Ausgabe:
+
+```text
+250 2.0.0 Ok: queued as CDE164099E
+```
+
+Postfix hat die Mail zuerst angenommen. Danach wurde geprüft, was Amavis mit der Mail gemacht hat:
+
+```bash
+# command
+sudo grep -Ei "CDE164099E|EICAR|virus|INFECTED|Blocked|Passed|quarantine" /var/log/mail.log | tail -n 40
+```
+
+Relevante Ausgabe:
+
+```text
+Blocked INFECTED (Eicar-Signature) {DiscardedInbound,Quarantined}
+status=sent (250 2.7.0 Ok, discarded, id=03879-01 - INFECTED: Eicar-Signature)
+```
+
+Damit ist bestätigt, dass ClamAV die EICAR-Testsignatur erkannt und Amavis die Mail blockiert hat.
+
+Danach wurde die DKIM-Reihenfolge getestet. Dafür wurde eine saubere Mail an den CyberLab-Reflector gesendet:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to reflector@cyberlab.fhnw.ch --server 127.0.0.1 --header "Subject: Amavis DKIM order test" --body "test after amavis integration" 2>&1 | grep -Ei "queued|250 2.0.0"
+
+# response
+250 2.0.0 Ok: queued as EB8974099E
+```
+
+Danach wurde im Log nach dieser Queue-ID gesucht:
+
+```bash
+# command
+sudo grep -Ei "EB8974099E|Amavis DKIM order test|Passed CLEAN|DKIM-Signature|status=sent" /var/log/mail.log | tail -n 40
+```
+
+Dabei zeigte sich, dass DKIM zweimal angewendet wurde:
+
+```text
+EB8974099E: DKIM-Signature field added
+21379409C8: DKIM-Signature field added
+Passed CLEAN ... Queue-ID: EB8974099E ... queued_as: 21379409C8
+```
+
+Der Grund war, dass beim Rückkanal `127.0.0.1:10025` die Milter erneut aktiv waren. Dadurch wurde die Mail nach der Amavis-Prüfung ein zweites Mal von OpenDKIM signiert.
+
+Zur Korrektur wurde erneut `/etc/postfix/master.cf` geöffnet:
+
+```bash
+# command
+sudo nano /etc/postfix/master.cf
+```
+
+Im Block `127.0.0.1:10025` wurde folgende Zeile ergänzt:
+
+```text
+    -o smtpd_milters=
+```
+
+Die Zeile wurde direkt unter `content_filter=` eingefügt:
+
+```text
+127.0.0.1:10025 inet n    -    -    -    -    smtpd
+    -o content_filter=
+    -o smtpd_milters=
+```
+
+Damit werden beim Rückkanal von Amavis zu Postfix keine Milter erneut ausgeführt.
+
+Danach wurde die Postfix-Konfiguration geprüft und Postfix neu gestartet:
+
+```bash
+# command
+sudo postfix check
+sudo systemctl restart postfix
+```
+
+Anschliessend wurde der DKIM-Reihenfolge-Test wiederholt:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to reflector@cyberlab.fhnw.ch --server 127.0.0.1 --header "Subject: Amavis DKIM order retest" --body "test after disabling milter on 10025" 2>&1 | grep -Ei "queued|250 2.0.0"
+
+# response
+250 2.0.0 Ok: queued as 28F4C4099E
+```
+
+Die Logs wurden erneut geprüft:
+
+```bash
+# command
+sudo grep -Ei "28F4C4099E|Passed CLEAN|DKIM-Signature|status=sent" /var/log/mail.log | tail -n 40
+```
+
+Relevante Ausgabe:
+
+```text
+28F4C4099E: DKIM-Signature field added
+Passed CLEAN ... Queue-ID: 28F4C4099E ... queued_as: 539DA409C8
+28F4C4099E: to=<reflector@cyberlab.fhnw.ch>, relay=127.0.0.1[127.0.0.1]:10024, status=sent
+539DA409C8: to=<reflector@cyberlab.fhnw.ch>, relay=srvMSG01.cyberlab.fhnw.ch[192.168.64.33]:25, status=sent
+```
+
+Nach dem Fix wurde DKIM nur noch einmal auf der ursprünglichen Queue-ID `28F4C4099E` angewendet. Die Mail wurde danach durch Amavis geprüft und als neue Queue-ID `539DA409C8` weitergesendet, ohne erneut DKIM zu signieren.
+
+Zum Schluss wurde die Mailqueue geprüft:
+
+```bash
+# command
+mailq
+
+# response
+Mail queue is empty
+```
+
+Alle beteiligten Dienste wurden ebenfalls geprüft:
+
+```bash
+# command
+systemctl is-active postfix amavis clamav-daemon clamav-freshclam opendkim
+
+# response
+active
+active
+active
+active
+active
+```
+
+Die EICAR-Testdatei wurde entfernt:
+
+```bash
+# command
+rm /tmp/eicar.txt
+```
+
+Damit sind Amavis und ClamAV erfolgreich eingebunden. Saubere Mails werden durchgelassen, die EICAR-Testsignatur wird blockiert und die DKIM-Reihenfolge wurde so korrigiert, dass ausgehende Mails nicht doppelt signiert werden.
 
 ## 8 Greylisting
 
