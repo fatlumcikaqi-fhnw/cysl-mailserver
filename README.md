@@ -1282,11 +1282,381 @@ Damit ist DKIM erfolgreich eingerichtet. Ausgehende Mails werden durch OpenDKIM 
 
 ## 6 DMARC
 
+In diesem Kapitel wird DMARC (Domain-based Message Authentication, Reporting and Conformance) eingerichtet. DMARC baut auf SPF und DKIM auf und legt fest, wie empfangende Mailserver mit Nachrichten umgehen sollen, die diese Prüfungen nicht bestehen. Zusätzlich kann DMARC Berichte erzeugen, damit sichtbar wird, ob fremde Server versuchen, E-Mails im Namen unserer Domain zu versenden.
+
+Für die Umsetzung wird OpenDMARC als Milter in Postfix eingebunden. Dadurch prüft unser Mailserver eingehende E-Mails auf DMARC und schreibt das Ergebnis in die Mail-Header und in das Mail-Log.
+
 ### 6.1 Konfiguration
+
+Zuerst wurde geprüft, ob OpenDMARC bereits installiert ist:
+
+```bash
+# command
+dpkg-query -W -f='${binary:Package} ${Version}\n' opendmarc 2>/dev/null
+```
+
+Da keine Ausgabe erschien, war OpenDMARC noch nicht installiert. Deshalb wurde das Paket installiert:
+
+```bash
+# command
+sudo apt-get install -y opendmarc
+```
+
+Während der Installation wurde die optionale Datenbankeinrichtung nicht verwendet. Für diese Laborumgebung wird OpenDMARC nur als Milter für Postfix benötigt.
+
+Danach wurde geprüft, ob der Dienst läuft:
+
+```bash
+# command
+systemctl is-active opendmarc
+
+# response
+active
+```
+
+Anschliessend wurde die bestehende OpenDMARC-Konfiguration geprüft:
+
+```bash
+# command
+sudo grep -E '^(Socket|AuthservID|TrustedAuthservIDs|IgnoreHosts|HistoryFile)' /etc/opendmarc.conf
+
+# response
+Socket local:/run/opendmarc/opendmarc.sock
+```
+
+Standardmässig verwendete OpenDMARC also einen lokalen Unix-Socket. Für die Postfix-Anbindung wurde OpenDMARC auf einen TCP-Socket auf `localhost` mit Port `12302` umgestellt.
+
+Vor der Anpassung wurde die ursprüngliche Konfiguration gesichert:
+
+```bash
+# command
+sudo cp /etc/opendmarc.conf /etc/opendmarc.conf.bak-before-dmarc
+```
+
+Danach wurde `/etc/opendmarc.conf` angepasst. Die relevante Konfiguration sieht danach so aus:
+
+```bash
+# command
+sudo grep -nE '^(AuthservID|Socket|SPFSelfValidate|HistoryFile|IgnoreHosts|TrustedAuthservIDs|Syslog)' /etc/opendmarc.conf
+
+# response
+115:AuthservID mail.u8.cyberlab.fhnw.ch
+116:Socket inet:12302@localhost
+117:SPFSelfValidate yes
+118:HistoryFile /var/run/opendmarc/opendmarc.dat
+119:IgnoreHosts /etc/opendmarc/ignore.hosts
+120:TrustedAuthservIDs mail.u8.cyberlab.fhnw.ch
+121:Syslog true
+```
+
+Die wichtigsten Werte sind:
+
+- `AuthservID mail.u8.cyberlab.fhnw.ch`: Der eigene Mailserver wird als prüfender Authentifizierungsdienst angegeben.
+- `Socket inet:12302@localhost`: OpenDMARC lauscht lokal auf Port `12302`.
+- `SPFSelfValidate yes`: OpenDMARC darf SPF selbst prüfen, falls nötig.
+- `IgnoreHosts /etc/opendmarc/ignore.hosts`: Bestimmte lokale Hosts werden von der DMARC-Prüfung ausgenommen.
+- `TrustedAuthservIDs mail.u8.cyberlab.fhnw.ch`: Authentifizierungsergebnisse dieses Servers werden als vertrauenswürdig behandelt.
+- `Syslog true`: OpenDMARC schreibt Logmeldungen ins Systemlog.
+
+Danach wurde das Verzeichnis für die Datei `ignore.hosts` erstellt:
+
+```bash
+# command
+sudo install -d -m 755 /etc/opendmarc
+```
+
+Die Datei `/etc/opendmarc/ignore.hosts` wurde anschliessend erstellt:
+
+```bash
+# command
+sudo tee /etc/opendmarc/ignore.hosts >/dev/null <<'EOF'
+127.0.0.1
+localhost
+192.168.97.64
+EOF
+```
+
+Die Datei enthält damit folgende Einträge:
+
+```bash
+# command
+sudo cat /etc/opendmarc/ignore.hosts
+
+# response
+127.0.0.1
+localhost
+192.168.97.64
+```
+
+Diese Hosts werden ignoriert, damit lokale Verbindungen und der eigene Mailserver nicht unnötig durch OpenDMARC geprüft werden.
+
+Danach wurde OpenDMARC neu gestartet:
+
+```bash
+# command
+sudo systemctl restart opendmarc
+```
+
+Der Dienst wurde erneut geprüft:
+
+```bash
+# command
+systemctl is-active opendmarc
+
+# response
+active
+```
+
+Zusätzlich wurde kontrolliert, ob OpenDMARC wirklich auf Port `12302` lauscht:
+
+```bash
+# command
+sudo ss -ltnp | grep ':12302'
+
+# response
+LISTEN 0 4096 127.0.0.1:12302 0.0.0.0:* users:(("opendmarc",pid=1753,fd=3))
+```
+
+Damit ist OpenDMARC korrekt gestartet und lokal über `127.0.0.1:12302` erreichbar.
+
+Als Nächstes wurde die bestehende Milter-Konfiguration von Postfix geprüft, damit die bestehende OpenDKIM-Konfiguration nicht überschrieben wird:
+
+```bash
+# command
+sudo postconf -n | grep -E '^(smtpd_milters|non_smtpd_milters|milter_default_action|milter_protocol)'
+
+# response
+milter_default_action = accept
+milter_protocol = 6
+non_smtpd_milters = inet:localhost:12301
+smtpd_milters = inet:localhost:12301
+```
+
+Zu diesem Zeitpunkt war nur OpenDKIM auf Port `12301` eingebunden. Danach wurde OpenDMARC zusätzlich in `smtpd_milters` eingetragen:
+
+```bash
+# command
+sudo postconf -e "smtpd_milters = inet:localhost:12301, inet:localhost:12302"
+```
+
+Die neue Konfiguration wurde geprüft:
+
+```bash
+# command
+sudo postconf -n smtpd_milters
+
+# response
+smtpd_milters = inet:localhost:12301, inet:localhost:12302
+```
+
+Damit verwendet Postfix für eingehende SMTP-Mails nun beide Milter:
+
+- OpenDKIM auf `inet:localhost:12301`
+- OpenDMARC auf `inet:localhost:12302`
+
+Anschliessend wurde Postfix neu geladen:
+
+```bash
+# command
+sudo systemctl reload postfix
+```
+
+Die finale Milter-Konfiguration sieht so aus:
+
+```bash
+# command
+sudo postconf -n | grep -E '^(smtpd_milters|non_smtpd_milters|milter_default_action|milter_protocol)'
+
+# response
+milter_default_action = accept
+milter_protocol = 6
+non_smtpd_milters = inet:localhost:12301
+smtpd_milters = inet:localhost:12301, inet:localhost:12302
+```
+
+`non_smtpd_milters` bleibt nur bei OpenDKIM. OpenDMARC wird hier vor allem für eingehende SMTP-Mails benötigt und ist deshalb in `smtpd_milters` eingetragen.
 
 ### 6.2 DNS und Richtlinien
 
+Damit andere Mailserver wissen, welche DMARC-Richtlinie für unsere Domain gilt, muss ein DMARC-TXT-Record in der DNS-Zone gesetzt werden.
+
+Zuerst wurde geprüft, ob bereits ein DMARC-Record existiert:
+
+```bash
+# command
+dig @127.0.0.1 _dmarc.u8.cyberlab.fhnw.ch TXT +short
+```
+
+Da keine Ausgabe erschien, existierte noch kein DMARC-Record.
+
+Danach wurde die Forward-Zone geprüft:
+
+```bash
+# command
+sudo grep -nE 'SOA|serial|TXT|MX|_dmarc' /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+
+# response
+2:@   IN SOA ns1.u8.cyberlab.fhnw.ch. admin.u8.cyberlab.fhnw.ch. (
+3:        2026051604 ; serial
+20:@    IN MX 10 mail.u8.cyberlab.fhnw.ch.
+23:@    IN TXT "v=spf1 mx -all"
+26:default._domainkey IN TXT ( "v=DKIM1; h=sha256; k=rsa; "
+```
+
+Dabei war ersichtlich, dass SPF und DKIM bereits vorhanden waren, aber DMARC noch fehlte.
+
+Vor der Anpassung wurde die Forward-Zone gesichert:
+
+```bash
+# command
+sudo cp /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db.bak-before-dmarc
+```
+
+Danach wurde der DMARC-Record ergänzt. Gleichzeitig wurde der DNS-Serial von `2026051604` auf `2026051605` erhöht.
+
+Der neue DMARC-Eintrag lautet:
+
+```dns
+; DMARC policy
+_dmarc IN TXT "v=DMARC1; p=none; rua=mailto:fatlum@u8.cyberlab.fhnw.ch"
+```
+
+Die gesetzten Werte bedeuten:
+
+- `v=DMARC1`: Es handelt sich um einen DMARC-Record.
+- `p=none`: Es wird noch keine strenge Aktion wie Quarantäne oder Ablehnung erzwungen.
+- `rua=mailto:fatlum@u8.cyberlab.fhnw.ch`: Aggregierte DMARC-Berichte sollen an diese Adresse gesendet werden.
+
+Die Policy `p=none` ist für den Anfang sinnvoll, weil damit DMARC zuerst beobachtend betrieben wird. So kann geprüft werden, ob SPF und DKIM korrekt funktionieren, ohne dass legitime E-Mails direkt abgelehnt werden.
+
+Danach wurde kontrolliert, ob der Record korrekt in der Zone steht:
+
+```bash
+# command
+sudo grep -nE 'serial|_dmarc' /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+
+# response
+3:        2026051605 ; serial
+31:_dmarc IN TXT "v=DMARC1; p=none; rua=mailto:fatlum@u8.cyberlab.fhnw.ch"
+```
+
+Anschliessend wurde die Zone syntaktisch geprüft:
+
+```bash
+# command
+sudo named-checkzone u8.cyberlab.fhnw.ch /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db
+
+# response
+zone u8.cyberlab.fhnw.ch/IN: loaded serial 2026051605
+OK
+```
+
+Danach wurde die Zone neu geladen:
+
+```bash
+# command
+sudo rndc reload u8.cyberlab.fhnw.ch
+
+# response
+zone reload queued
+```
+
+Der DMARC-Record wurde danach lokal über BIND geprüft:
+
+```bash
+# command
+dig @127.0.0.1 _dmarc.u8.cyberlab.fhnw.ch TXT +short
+
+# response
+"v=DMARC1; p=none; rua=mailto:fatlum@u8.cyberlab.fhnw.ch"
+```
+
+Zusätzlich wurde geprüft, ob der Record auch über den CyberLab-DNS sichtbar ist:
+
+```bash
+# command
+dig @192.168.64.10 _dmarc.u8.cyberlab.fhnw.ch TXT +short
+
+# response
+"v=DMARC1; p=none; rua=mailto:fatlum@u8.cyberlab.fhnw.ch"
+```
+
+Damit ist der DMARC-DNS-Record korrekt veröffentlicht.
+
 ### 6.3 Tests
+
+Zum Test wurde eine Mail über den lokalen Postfix an den CyberLab-Reflector gesendet. Die Ausgabe von `swaks` wurde dabei unterdrückt, weil nur die Logs relevant sind:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to reflector@cyberlab.fhnw.ch --server 127.0.0.1 >/dev/null
+```
+
+Danach wurde im Mail-Log geprüft, ob OpenDMARC aktiv wurde:
+
+```bash
+# command
+sudo grep -i 'opendmarc' /var/log/mail.log | tail -n 10
+
+# response
+2026-05-17T14:57:51.742322+02:00 mail opendmarc[1700]: OpenDMARC Filter v1.4.2 starting ()
+2026-05-17T14:57:51.742368+02:00 mail opendmarc[1700]: additional trusted authentication services: (none)
+2026-05-17T15:03:37.223100+02:00 mail opendmarc[1700]: OpenDMARC Filter v1.4.2 terminating with status 0, errno = 0
+2026-05-17T15:03:37.256132+02:00 mail opendmarc[1753]: OpenDMARC Filter v1.4.2 starting ()
+2026-05-17T15:03:37.256289+02:00 mail opendmarc[1753]: additional trusted authentication services: mail.u8.cyberlab.fhnw.ch
+2026-05-17T15:12:04.349378+02:00 mail opendmarc[1753]: ignoring connection from localhost
+2026-05-17T15:12:18.383250+02:00 mail opendmarc[1753]: 4B8BB4001C: cyberlab.fhnw.ch pass
+```
+
+Die Zeile mit `cyberlab.fhnw.ch pass` zeigt, dass OpenDMARC eine eingehende Mail geprüft hat und die DMARC-Prüfung erfolgreich war.
+
+Zusätzlich wurden die Mail-Header der empfangenen Mail geprüft:
+
+```bash
+# command
+sudo grep -iE 'Authentication-Results|DMARC|DKIM|SPF' /var/mail/fatlum | tail -n 30
+
+# response
+Received-SPF: pass (cyberlab.fhnw.ch: 192.168.64.33 is authorized to use 'reflector@cyberlab.fhnw.ch' in 'mfrom' identity (mechanism 'mx' matched)) receiver=u8.cyberlab.fhnw.ch; identity=mailfrom; envelope-from="reflector@cyberlab.fhnw.ch"; helo=srvMSG01.cyberlab.fhnw.ch; client-ip=192.168.64.33
+Received-SPF: pass (cyberlab.fhnw.ch: 192.168.64.33 is authorized to use 'reflector@cyberlab.fhnw.ch' in 'mfrom' identity (mechanism 'mx' matched)) receiver=u8.cyberlab.fhnw.ch; identity=mailfrom; envelope-from="reflector@cyberlab.fhnw.ch"; helo=srvMSG01.cyberlab.fhnw.ch; client-ip=192.168.64.33
+Authentication-Results: mail.u8.cyberlab.fhnw.ch; dmarc=pass (p=reject dis=none) header.from=cyberlab.fhnw.ch
+Received-SPF: pass (cyberlab.fhnw.ch: 192.168.64.33 is authorized to use 'reflector@cyberlab.fhnw.ch' in 'mfrom' identity (mechanism 'mx' matched)) receiver=u8.cyberlab.fhnw.ch; identity=mailfrom; envelope-from="reflector@cyberlab.fhnw.ch"; helo=srvMSG01.cyberlab.fhnw.ch; client-ip=192.168.64.33
+```
+
+Die wichtigste Zeile ist:
+
+```text
+Authentication-Results: mail.u8.cyberlab.fhnw.ch; dmarc=pass (p=reject dis=none) header.from=cyberlab.fhnw.ch
+```
+
+Damit ist bestätigt, dass OpenDMARC die eingehende Mail geprüft und das Ergebnis in die Header geschrieben hat.
+
+Zum Schluss wurde geprüft, ob die Mailqueue leer ist:
+
+```bash
+# command
+mailq
+
+# response
+Mail queue is empty
+```
+
+Zusätzlich wurden alle beteiligten Dienste geprüft:
+
+```bash
+# command
+systemctl is-active bind9 postfix opendkim opendmarc
+
+# response
+active
+active
+active
+active
+```
+
+Damit ist DMARC erfolgreich eingerichtet und getestet. Der Mailserver veröffentlicht eine DMARC-Policy im DNS, Postfix leitet eingehende Mails an OpenDMARC weiter und die Logs sowie Mail-Header zeigen erfolgreiche DMARC-Prüfungen.
+
+---
 
 ## 7 Virenscan (Amavis, ClamAV)
 
