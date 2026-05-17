@@ -2100,13 +2100,237 @@ rm /tmp/eicar.txt
 
 Damit sind Amavis und ClamAV erfolgreich eingebunden. Saubere Mails werden durchgelassen, die EICAR-Testsignatur wird blockiert und die DKIM-Reihenfolge wurde so korrigiert, dass ausgehende Mails nicht doppelt signiert werden.
 
+---
+
 ## 8 Greylisting
+
+In diesem Kapitel wird Greylisting mit Postgrey eingerichtet. Greylisting verzögert unbekannte Absender beim ersten Zustellversuch temporär. Seriöse Mailserver versuchen die Zustellung später erneut, während viele Spam-Systeme dies nicht tun.
 
 ### 8.1 Installation und Postfix
 
+Zuerst wurde Postgrey installiert:
+
+```bash
+# command
+sudo apt-get install -y postgrey
+```
+
+Danach wurde geprüft, ob der Dienst läuft:
+
+```bash
+# command
+systemctl is-active postgrey
+
+# response
+active
+```
+
+Zusätzlich wurde geprüft, ob Postgrey auf Port `10023` lauscht:
+
+```bash
+# command
+sudo ss -ltnp | grep ':10023'
+
+# response
+LISTEN 0 4096 127.0.0.1:10023 0.0.0.0:* users:(("postgrey --inet",pid=4803,fd=5))
+LISTEN 0 4096 [::1]:10023 [::]:* users:(("postgrey --inet",pid=4803,fd=4))
+```
+
+Vor der Postfix-Anbindung wurde die aktuelle Empfängerprüfung kontrolliert:
+
+```bash
+# command
+sudo postconf -n smtpd_recipient_restrictions
+
+# response
+smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, check_policy_service unix:private/policyd-spf, reject_unauth_destination
+```
+
+Danach wurde Postgrey als zusätzlicher Policy-Dienst ergänzt:
+
+```bash
+# command
+sudo postconf -e "smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, check_policy_service unix:private/policyd-spf, reject_unauth_destination, check_policy_service inet:127.0.0.1:10023"
+```
+
+Kontrolle:
+
+```bash
+# command
+sudo postconf -n smtpd_recipient_restrictions
+
+# response
+smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, check_policy_service unix:private/policyd-spf, reject_unauth_destination, check_policy_service inet:127.0.0.1:10023
+```
+
+Danach wurde die Postfix-Konfiguration geprüft und neu geladen:
+
+```bash
+# command
+sudo postfix check
+sudo systemctl reload postfix
+```
+
 ### 8.2 Whitelist und Verzoegerung
 
+Zuerst wurde die Postgrey-Default-Datei gesichert und geöffnet:
+
+```bash
+# command
+sudo cp /etc/default/postgrey /etc/default/postgrey.bak-before-greylisting
+sudo nano /etc/default/postgrey
+```
+
+Die Verzögerung wurde auf `60` Sekunden gesetzt:
+
+```text
+POSTGREY_OPTS="--inet=10023 --delay=60"
+```
+
+Danach wurde Postgrey neu gestartet:
+
+```bash
+# command
+sudo systemctl restart postgrey
+```
+
+Kontrolle:
+
+```bash
+# command
+systemctl is-active postgrey
+
+# response
+active
+```
+
+Der Port wurde nochmals geprüft:
+
+```bash
+# command
+sudo ss -ltnp | grep ':10023'
+
+# response
+LISTEN 0 4096 127.0.0.1:10023 0.0.0.0:* users:(("postgrey --inet",pid=4970,fd=5))
+LISTEN 0 4096 [::1]:10023 [::]:* users:(("postgrey --inet",pid=4970,fd=4))
+```
+
+Danach wurden die vorhandenen Postgrey-Dateien geprüft:
+
+```bash
+# command
+ls -1 /etc/postgrey
+
+# response
+whitelist_clients
+whitelist_recipients
+```
+
+Die Client-Whitelist wurde geöffnet:
+
+```bash
+# command
+sudo nano /etc/postgrey/whitelist_clients
+```
+
+Folgende Einträge wurden ergänzt:
+
+```text
+# CyberLab trusted mail server
+srvMSG01.cyberlab.fhnw.ch
+srvmsg01.cyberlab.fhnw.ch
+192.168.64.33
+```
+
+Danach wurde Postgrey neu gestartet:
+
+```bash
+# command
+sudo systemctl restart postgrey
+```
+
+Kontrolle der Whitelist:
+
+```bash
+# command
+sudo tail -n 10 /etc/postgrey/whitelist_clients
+
+# response
+# CyberLab trusted mail server
+srvMSG01.cyberlab.fhnw.ch
+srvmsg01.cyberlab.fhnw.ch
+192.168.64.33
+```
+
+Kontrolle der Verzögerung:
+
+```bash
+# command
+grep -n '^POSTGREY_OPTS' /etc/default/postgrey
+
+# response
+8:POSTGREY_OPTS="--inet=10023 --delay=60"
+```
+
 ### 8.3 Tests
+
+Zuerst wurde Postgrey direkt über den Policy-Port mit einem unbekannten Beispielclient getestet:
+
+```bash
+# command
+printf 'request=smtpd_access_policy\nprotocol_state=RCPT\nprotocol_name=SMTP\nclient_address=203.0.113.99\nclient_name=unknown.example\nsender=test@example.net\nrecipient=fatlum@u8.cyberlab.fhnw.ch\n\n' | nc 127.0.0.1 10023
+```
+
+Relevante Ausgabe:
+
+```text
+action=DEFER_IF_PERMIT Greylisted
+```
+
+Das bedeutet, dass Postgrey den unbekannten Absender temporär verzögert. Die Mail wird dabei nicht dauerhaft verworfen.
+
+Danach wurde der whitelisted CyberLab-Mailserver getestet:
+
+```bash
+# command
+printf 'request=smtpd_access_policy\nprotocol_state=RCPT\nprotocol_name=SMTP\nclient_address=192.168.64.33\nclient_name=srvMSG01.cyberlab.fhnw.ch\nsender=reflector@cyberlab.fhnw.ch\nrecipient=fatlum@u8.cyberlab.fhnw.ch\n\n' | nc -w 3 127.0.0.1 10023
+```
+
+Ausgabe:
+
+```text
+action=DUNNO
+```
+
+`DUNNO` bedeutet, dass Postgrey nicht eingreift und Postfix normal weitermachen lässt.
+
+Da in `/var/log/mail.log` keine Postgrey-Einträge sichtbar waren, wurden die Logs über `journalctl` geprüft:
+
+```bash
+# command
+sudo journalctl -u postgrey --since "10 minutes ago" --no-pager
+```
+
+Relevante Ausgabe:
+
+```text
+postgrey: action=greylist, reason=new, client_name=unknown.example, client_address=203.0.113.99, sender=test@example.net, recipient=fatlum@u8.cyberlab.fhnw.ch
+postgrey: action=pass, reason=client whitelist, client_name=srvMSG01.cyberlab.fhnw.ch, client_address=192.168.64.33, sender=reflector@cyberlab.fhnw.ch, recipient=fatlum@u8.cyberlab.fhnw.ch
+```
+
+Zum Schluss wurde die Mailqueue geprüft:
+
+```bash
+# command
+mailq
+
+# response
+Mail queue is empty
+```
+
+Damit ist Greylisting korrekt eingerichtet. Unbekannte Absender werden temporär verzögert, während der CyberLab-Reflector über die Whitelist direkt durchgelassen wird.
+
+---
 
 ## 9 Tarpit und Anti-UBE
 
