@@ -2334,11 +2334,235 @@ Damit ist Greylisting korrekt eingerichtet. Unbekannte Absender werden temporär
 
 ## 9 Tarpit und Anti-UBE
 
+In diesem Kapitel werden einfache Tarpit- und Anti-UBE-Massnahmen in Postfix eingerichtet. Tarpit verzögert fehlerhafte SMTP-Clients, während Anti-UBE ungültige HELO- und Absenderangaben ablehnt. Zusätzlich werden einfache Rate-Limits gesetzt, um zu viele Mails in kurzer Zeit zu begrenzen.
+
 ### 9.1 Tarpit-Konfiguration
+
+Zuerst wurde die bestehende Postfix-Konfiguration gesichert:
+
+```bash
+# command
+sudo cp /etc/postfix/main.cf /etc/postfix/main.cf.bak-before-tarpit-antiube
+```
+
+Danach wurden die Tarpit-Werte gesetzt:
+
+```bash
+# command
+sudo postconf -e "smtpd_error_sleep_time = 5s"
+sudo postconf -e "smtpd_soft_error_limit = 3"
+sudo postconf -e "smtpd_hard_error_limit = 5"
+```
+
+Die Werte bedeuten:
+
+```text
+smtpd_error_sleep_time = 5s
+smtpd_soft_error_limit = 3
+smtpd_hard_error_limit = 5
+```
+
+Damit verzögert Postfix Clients nach mehreren Fehlern und trennt die Verbindung nach zu vielen Fehlern.
 
 ### 9.2 Anti-UBE-Konfiguration
 
+Für die Anti-UBE-Grundkonfiguration wurden `VRFY`, ungültige HELO-Angaben und ungültige Absenderadressen eingeschränkt:
+
+```bash
+# command
+sudo postconf -e "smtpd_helo_required = yes"
+sudo postconf -e "disable_vrfy_command = yes"
+sudo postconf -e "smtpd_helo_restrictions = reject_invalid_helo_hostname, reject_non_fqdn_helo_hostname, permit_mynetworks"
+sudo postconf -e "smtpd_sender_restrictions = reject_non_fqdn_sender, reject_unknown_sender_domain, permit_mynetworks"
+```
+
+Zusätzlich wurden einfache Rate-Limits gegen zu viele Verbindungen und Mails in kurzer Zeit gesetzt:
+
+```bash
+# command
+sudo postconf -e "anvil_rate_time_unit = 60s"
+sudo postconf -e "smtpd_client_connection_count_limit = 10"
+sudo postconf -e "smtpd_client_connection_rate_limit = 20"
+sudo postconf -e "smtpd_client_message_rate_limit = 30"
+```
+
+Danach wurde Postfix neu geladen:
+
+```bash
+# command
+sudo postfix check
+sudo systemctl reload postfix
+```
+
+Die final gesetzten Werte waren:
+
+```bash
+# command
+sudo postconf -n | grep -E '^(smtpd_error_sleep_time|smtpd_soft_error_limit|smtpd_hard_error_limit|smtpd_helo_required|disable_vrfy_command|smtpd_helo_restrictions|smtpd_sender_restrictions|anvil_rate_time_unit|smtpd_client_connection_count_limit|smtpd_client_connection_rate_limit|smtpd_client_message_rate_limit)'
+```
+
+Relevante Ausgabe:
+
+```text
+disable_vrfy_command = yes
+smtpd_error_sleep_time = 5s
+smtpd_hard_error_limit = 5
+smtpd_helo_required = yes
+smtpd_helo_restrictions = reject_invalid_helo_hostname, reject_non_fqdn_helo_hostname, permit_mynetworks
+smtpd_sender_restrictions = reject_non_fqdn_sender, reject_unknown_sender_domain, permit_mynetworks
+smtpd_soft_error_limit = 3
+anvil_rate_time_unit = 60s
+smtpd_client_connection_count_limit = 10
+smtpd_client_connection_rate_limit = 20
+smtpd_client_message_rate_limit = 30
+```
+
 ### 9.3 Tests
+
+Zuerst wurde geprüft, ob der Befehl `VRFY` deaktiviert ist:
+
+```bash
+# command
+{ sleep 1; printf 'EHLO test.example\r\n'; sleep 1; printf 'VRFY root\r\n'; sleep 1; printf 'QUIT\r\n'; } | nc -w 8 127.0.0.1 25
+```
+
+Relevante Ausgabe:
+
+```text
+502 5.5.1 VRFY command is disabled
+```
+
+Danach wurde ein ungültiger HELO-Name getestet:
+
+```bash
+# command
+{ sleep 1; printf 'HELO invalid_name\r\n'; sleep 1; printf 'MAIL FROM:<test@example.net>\r\n'; sleep 1; printf 'RCPT TO:<fatlum@u8.cyberlab.fhnw.ch>\r\n'; sleep 1; printf 'QUIT\r\n'; } | nc -w 10 127.0.0.1 25
+```
+
+Relevante Ausgabe:
+
+```text
+504 5.5.2 <invalid_name>: Helo command rejected: need fully-qualified hostname
+```
+
+Danach wurde ein ungültiger Absender getestet:
+
+```bash
+# command
+{ sleep 1; printf 'EHLO test.example\r\n'; sleep 1; printf 'MAIL FROM:<invalidsender>\r\n'; sleep 1; printf 'RCPT TO:<fatlum@u8.cyberlab.fhnw.ch>\r\n'; sleep 1; printf 'QUIT\r\n'; } | nc -w 10 127.0.0.1 25
+```
+
+Relevante Ausgabe:
+
+```text
+504 5.5.2 <invalidsender>: Sender address rejected: need fully-qualified address
+```
+
+Anschliessend wurde geprüft, ob normale Mails weiterhin funktionieren:
+
+```bash
+# command
+swaks --from fatlum@u8.cyberlab.fhnw.ch --to reflector@cyberlab.fhnw.ch --server 127.0.0.1 --header "Subject: Anti-UBE normal mail test" --body "normal mail after tarpit and anti-ube" 2>&1 | grep -Ei "queued|250 2.0.0|reject|error"
+```
+
+Relevante Ausgabe:
+
+```text
+250 2.0.0 Ok: queued as EFCCE40A50
+```
+
+Im Log wurde geprüft, ob die Mail erfolgreich über Amavis verarbeitet und an den CyberLab-Reflector gesendet wurde:
+
+```bash
+# command
+sudo grep -Ei "EFCCE40A50|Anti-UBE normal mail test|status=sent" /var/log/mail.log | tail -n 30
+```
+
+Relevante Ausgabe:
+
+```text
+EFCCE40A50: to=<reflector@cyberlab.fhnw.ch>, relay=127.0.0.1[127.0.0.1]:10024, status=sent
+30C9640A52: to=<reflector@cyberlab.fhnw.ch>, relay=srvMSG01.cyberlab.fhnw.ch[192.168.64.33]:25, status=sent
+```
+
+Zum Test der Bulk-Mail-Begrenzung wurde das Message-Rate-Limit kurzzeitig auf `3` gesetzt:
+
+```bash
+# command
+sudo postconf -e "smtpd_client_message_rate_limit = 3"
+sudo postconf -e "smtpd_client_event_limit_exceptions ="
+sudo systemctl reload postfix
+```
+
+Danach wurden fünf Mails schnell hintereinander gesendet:
+
+```bash
+# command
+for i in 1 2 3 4 5; do
+  echo "Bulk test $i"
+  swaks --from fatlum@u8.cyberlab.fhnw.ch --to fatlum@u8.cyberlab.fhnw.ch --server 127.0.0.1 --header "Subject: Bulk rate test $i" --body "bulk rate test" 2>&1 | grep -Ei "queued|rate|too many|reject|error|exceeded"
+done
+```
+
+Relevante Ausgabe:
+
+```text
+Bulk test 1
+250 2.0.0 Ok: queued as 97BEA40A50
+
+Bulk test 2
+250 2.0.0 Ok: queued as B5F4F40A52
+
+Bulk test 3
+250 2.0.0 Ok: queued as D230D40A50
+
+Bulk test 4
+450 4.7.1 Error: too much mail from 127.0.0.1
+
+Bulk test 5
+450 4.7.1 Error: too much mail from 127.0.0.1
+```
+
+Damit ist bestätigt, dass die Rate-Limitierung greift.
+
+Danach wurden die produktiven Werte wiederhergestellt:
+
+```bash
+# command
+sudo postconf -e "smtpd_client_message_rate_limit = 30"
+sudo postconf -X smtpd_client_event_limit_exceptions
+sudo systemctl reload postfix
+```
+
+Kontrolle:
+
+```bash
+# command
+sudo postconf -n | grep -E '^(anvil_rate_time_unit|smtpd_client_connection_count_limit|smtpd_client_connection_rate_limit|smtpd_client_message_rate_limit|smtpd_client_event_limit_exceptions)'
+```
+
+Relevante Ausgabe:
+
+```text
+anvil_rate_time_unit = 60s
+smtpd_client_connection_count_limit = 10
+smtpd_client_connection_rate_limit = 20
+smtpd_client_message_rate_limit = 30
+```
+
+Zum Schluss wurde die Mailqueue geprüft:
+
+```bash
+# command
+mailq
+
+# response
+Mail queue is empty
+```
+
+Damit sind Tarpit, Anti-UBE-Regeln und einfache Bulk-Mail-Begrenzung erfolgreich eingerichtet und getestet.
+
+---
 
 ## 10 DNSSEC
 
@@ -2347,6 +2571,8 @@ Damit ist Greylisting korrekt eingerichtet. Unbekannte Absender werden temporär
 ### 10.2 Zonen und Vertrauenskette
 
 ### 10.3 Verifikation
+
+---
 
 ## 11 Spam-Filter (Bayes)
 
