@@ -1700,6 +1700,7 @@ Danach wurde der Freshclam-Dienst wieder gestartet:
 
 ```bash
 # command
+sudo systemctl enable clamav-freshclam
 sudo systemctl start clamav-freshclam
 ```
 
@@ -2566,57 +2567,46 @@ Damit sind Tarpit, Anti-UBE-Regeln und einfache Bulk-Mail-Begrenzung erfolgreich
 
 ## 10 DNSSEC
 
-DNSSEC (Domain Name System Security Extensions) erweitert DNS um kryptografische Signaturen. Dadurch kann ein Resolver prüfen, ob eine DNS-Antwort wirklich von der zuständigen Zone stammt und unterwegs nicht verändert wurde. In diesem Kapitel wird DNSSEC für die eigene BIND9-Zone aktiviert, der DS-Record erzeugt und die Vertrauenskette geprüft.
+DNSSEC (Domain Name System Security Extensions) erweitert DNS um kryptografische Signaturen. Dadurch kann ein Resolver prüfen, ob eine DNS-Antwort wirklich von der zuständigen Zone stammt und unterwegs nicht verändert wurde. In diesem Kapitel wird DNSSEC für die cysL-Lab-Zone `u8.cyberlab-fhnw.ch` aktiviert, der DS-Record erzeugt und die lokale Vertrauenskette geprüft.
 
 ### 10.1 Berechtigungen und Signierung
 
-BIND muss im Zonenverzeichnis schreiben dürfen, da bei der automatischen DNSSEC-Signierung zusätzliche Dateien erzeugt werden. Dazu gehören DNSSEC-Keys, signierte Zonendateien und Journal-Dateien.
+Für DNSSEC wird in BIND9 die Funktion `dnssec-policy` verwendet. Dadurch übernimmt BIND die automatische Erzeugung der Schlüssel, das Signieren der Zone und spätere Schlüsselwechsel. BIND benötigt dafür Schreibrechte im Zonenverzeichnis, weil dort DNSSEC-Schlüssel, signierte Zonendateien und Journal-Dateien erzeugt werden.
+
+Dabei gibt es zwei wichtige Schlüsselarten:
+
+- **KSK (Key Signing Key)**: Dieser Schlüssel signiert den DNSKEY-Record selbst. Aus diesem Schlüssel wird später der DS-Record für die Parent-Zone erzeugt.
+- **ZSK (Zone Signing Key)**: Dieser Schlüssel signiert die normalen DNS-Records wie A-, MX- und TXT-Records.
+
+Wir müssen das Verzeichnis erstellen, das BIND verwenden soll. Wir können einen Symlink der Forward-Zone-Datei für u8.cyberlab.fhnw.ch erstellen.“
 
 ```bash
-# command
-sudo chown -R bind:bind /var/lib/bind/u8.cyberlab.fhnw.ch
-sudo chmod 755 /var/lib/bind/u8.cyberlab.fhnw.ch
+sudo ln -s /var/lib/bind/u8.cyberlab.fhnw.ch/forward.db /var/lib/bind/u8.cyberlab-fhnw.ch/forward.db
+sudo chown bind:bind /var/lib/bind/u8.cyberlab-fhnw.ch
+sudo chmod 755 /var/lib/bind/u8.cyberlab-fhnw.ch
 ```
-
-Vor der Änderung wurde die bestehende BIND-Konfiguration gesichert:
-
-```bash
-# command
-sudo cp /etc/bind/named.conf.local /etc/bind/named.conf.local.bak-before-dnssec
-```
-
-Danach wurde die Zonenkonfiguration angepasst:
 
 ```bash
 # command
 sudo nano /etc/bind/named.conf.local
 ```
 
+Für DNSSEC wurde folgende Zone ergänzt:
+
 ```conf
-# Inhalt der Forward-Zone:
-zone "u8.cyberlab.fhnw.ch" {
+zone "u8.cyberlab-fhnw.ch" {
     type master;
-    file "/var/lib/bind/u8.cyberlab.fhnw.ch/forward.db";
+    file "/var/lib/bind/u8.cyberlab-fhnw.ch/forward.db";
 
-    key-directory "/var/lib/bind/u8.cyberlab.fhnw.ch/";
-    inline-signing yes;
-    dnssec-policy default;
-};
-
-# Inhalt der Reverse-Zone:
-zone "64/29.97.168.192.in-addr.arpa" {
-    type master;
-    file "/var/lib/bind/u8.cyberlab.fhnw.ch/reverse.db";
-
-    key-directory "/var/lib/bind/u8.cyberlab.fhnw.ch/";
+    key-directory "/var/lib/bind/u8.cyberlab-fhnw.ch/";
     inline-signing yes;
     dnssec-policy default;
 };
 ```
 
-`inline-signing yes` sorgt dafür, dass BIND die Zone automatisch signiert. Mit `dnssec-policy default` übernimmt BIND die Verwaltung der DNSSEC-Schlüssel und der Signaturen.
+`inline-signing yes` sorgt dafür, dass BIND die Zone automatisch signiert, sobald sie geladen wird. Mit `dnssec-policy default` verwendet BIND die Standardrichtlinie für DNSSEC-Schlüssel und Signaturen.
 
-Die Konfiguration wurde geprüft und BIND neu gestartet:
+Danach wurde die BIND-Konfiguration geprüft und BIND neu gestartet:
 
 ```bash
 # command
@@ -2624,11 +2614,11 @@ sudo named-checkconf
 sudo systemctl restart bind9
 ```
 
-Nach dem Neustart wurden die DNSSEC-Dateien automatisch erzeugt:
+Nach dem Neustart erzeugt BIND die DNSSEC-Dateien automatisch. Dies wurde mit folgendem Befehl geprüft:
 
 ```bash
 # command
-sudo find /var/lib/bind/u8.cyberlab.fhnw.ch -maxdepth 1 -type f \( -name "K*.key" -o -name "*.signed" -o -name "*.jnl" \) -printf "%f\n" | sort
+sudo find /var/lib/bind/u8.cyberlab-fhnw.ch -maxdepth 1 -type f \( -name "K*.key" -o -name "*.signed" -o -name "*.jnl" \) -printf "%f\n" | sort
 ```
 
 Relevante Ausgabe:
@@ -2636,132 +2626,108 @@ Relevante Ausgabe:
 ```text
 forward.db.signed
 forward.db.signed.jnl
-Ku8.cyberlab.fhnw.ch.+013+33313.key
-K64%2F29.97.168.192.in-addr.arpa.+013+09133.key
-reverse.db.signed
-reverse.db.signed.jnl
+Ku8.cyberlab-fhnw.ch.+013+44175.key
 ```
 
-Damit sind Forward-Zone und Reverse-Zone lokal signiert.
+Damit ist die Zone `u8.cyberlab-fhnw.ch` lokal durch BIND signiert.
 
 ### 10.2 Zonen und Vertrauenskette
 
-Damit DNSSEC ausserhalb des eigenen Servers validiert werden kann, muss die Parent-Zone den passenden DS-Record kennen. Der DS-Record wird aus dem KSK (Key Signing Key) der eigenen Zone erzeugt und an den Dozenten beziehungsweise den Administrator der Parent-Zone gesendet.
-
-Zuerst wurde geprüft, ob der DNSKEY der Forward-Zone vorhanden ist:
+Damit DNSSEC nicht nur lokal funktioniert, sondern auch von anderen Resolvern validiert werden kann, muss die Parent-Zone den passenden DS-Record kennen. Der DS-Record wird aus dem KSK (Key Signing Key) erzeugt und an den Dozenten beziehungsweise den Administrator der Parent-Zone gesendet.
 
 ```bash
 # command
-dig @127.0.0.1 u8.cyberlab.fhnw.ch DNSKEY +short
+dig @127.0.0.1 dnskey u8.cyberlab-fhnw.ch | dnssec-dsfromkey -f - u8.cyberlab-fhnw.ch
 ```
 
 Relevante Ausgabe:
 
 ```text
-257 3 13 EYsz6ykzek3Mq1J0hKdLJSCa3n7atNfNLMPWazL2cNhw//VMb2iPYwwPDhcny4DXZ3YYgoxx5apkP9mEWjKbqQ==
+u8.cyberlab-fhnw.ch. IN DS 44175 13 2 E1D80FF5F8F54AB810351035B6361A8BC818416374B5F40896CBA109FCE35B4F
 ```
 
-Aus diesem DNSKEY wurde der DS-Record erzeugt:
+Diese DS-Zeile wurde an den Dozenten gesendet, damit sie in der Parent-Zone eingetragen werden kann. Der private Schlüssel wurde nicht weitergegeben.
+
+Für die lokale Prüfung mit `delv` wurde zusätzlich ein Trust Anchor erstellt:
+
+Zuerst wurde geprüft, ob der DNSKEY für die Zone vorhanden ist:
 
 ```bash
 # command
-dig @127.0.0.1 dnskey u8.cyberlab.fhnw.ch | dnssec-dsfromkey -f - u8.cyberlab.fhnw.ch
+dig @127.0.0.1 dnskey u8.cyberlab-fhnw.ch
 ```
 
-Relevante Ausgabe:
+Relevante Ausgabe in der Answer Section:
 
 ```text
-u8.cyberlab.fhnw.ch. IN DS 33313 13 2 03BA7E82B41CBC21133FBFE55B75F97561378616C4BA2CCFC69F8F035748F92F
+u8.cyberlab-fhnw.ch. 3600 IN DNSKEY 257 3 13 thR8JKWjFrmfMhcYARDNOr8RIlv8WxsDvwzQNbiq147m/stV4l+0Apnp LdysjtyC0cB2iIYok7oG2yMp4OAWbg==
 ```
 
-Dieser DS-Record wurde für die Parent-Zone verwendet. Der private Schlüssel wurde nicht weitergegeben.
-
-Danach wurde geprüft, ob der DS-Record über den CyberLab-DNS sichtbar ist:
+Dieser Key wird dann im Trust-Anchor verwendet:
 
 ```bash
 # command
-dig @192.168.64.10 u8.cyberlab.fhnw.ch DS +short
+sudo nano /var/lib/bind/u8.cyberlab-fhnw.ch/u8-check.conf
 ```
 
-Relevante Ausgabe:
+Inhalt:
 
-```text
-33313 13 2 03BA7E82B41CBC21133FBFE55B75F97561378616C4BA2CCFC69F8F035748F92F
-```
-
-Für die lokale Validierung mit `delv` wurde zusätzlich ein Trust Anchor erstellt:
-
-```bash
-# command
-sudo tee /var/lib/bind/u8.cyberlab.fhnw.ch/u8-check.conf >/dev/null <<'EOF'
+```conf
 trust-anchors {
-   "u8.cyberlab.fhnw.ch." static-key 257 3 13 "EYsz6ykzek3Mq1J0hKdLJSCa3n7atNfNLMPWazL2cNhw//VMb2iPYwwPDhcny4DXZ3YYgoxx5apkP9mEWjKbqQ==";
+   "u8.cyberlab-fhnw.ch." static-key 257 3 13 "thR8JKWjFrmfMhcYARDNOr8RIlv8WxsDvwzQNbiq147m/stV4l+0Apnp LdysjtyC0cB2iIYok7oG2yMp4OAWbg==";
 };
-EOF
 ```
 
-Für die Reverse-Zone wurde lokal ebenfalls DNSSEC aktiviert.
+Es sollte darauf geachtet werden, dass wie die Ausgabe im Trust-Anchor eingefügt wird.
 
 ### 10.3 Verifikation
 
-Zuerst wurde lokal geprüft, ob ein A-Record mit DNSSEC-Signatur ausgeliefert wird:
+Zuerst wurde geprüft, ob der A-Record der Mailserver-Zone mit DNSSEC-Signatur ausgeliefert wird:
 
 ```bash
 # command
-dig @127.0.0.1 mail.u8.cyberlab.fhnw.ch A +dnssec +short
+dig @127.0.0.1 mail.u8.cyberlab-fhnw.ch A +dnssec +short
 ```
 
 Relevante Ausgabe:
 
 ```text
 192.168.97.64
-A 13 5 86400 20260601040823 20260518092556 33313 u8.cyberlab.fhnw.ch. ...
+A 13 ... u8.cyberlab-fhnw.ch. ...
 ```
 
-Danach wurde die lokale Validierung mit `delv` geprüft:
+Danach wurde die lokale DNSSEC-Validierung mit `delv` geprüft:
 
 ```bash
 # command
-delv @127.0.0.1 mail.u8.cyberlab.fhnw.ch A -a /var/lib/bind/u8.cyberlab.fhnw.ch/u8-check.conf +root=u8.cyberlab.fhnw.ch.
+delv @127.0.0.1 mail.u8.cyberlab-fhnw.ch A -a /var/lib/bind/u8.cyberlab-fhnw.ch/u8-check.conf +root=u8.cyberlab-fhnw.ch.
 ```
 
 Relevante Ausgabe:
 
 ```text
 ; fully validated
-mail.u8.cyberlab.fhnw.ch. 86400 IN A 192.168.97.64
+mail.u8.cyberlab-fhnw.ch. 86400 IN A 192.168.97.64
+mail.u8.cyberlab-fhnw.ch. 86400 IN RRSIG A ...
 ```
 
-Auch der MX-Record wurde mit `delv` validiert:
+Die Ausgabe `fully validated` zeigt, dass die DNSSEC-Vertrauenskette lokal erfolgreich validiert werden konnte.
+
+Optional kann zusätzlich geprüft werden, ob der MX-Record ebenfalls validierbar ist:
 
 ```bash
 # command
-delv @127.0.0.1 u8.cyberlab.fhnw.ch MX -a /var/lib/bind/u8.cyberlab.fhnw.ch/u8-check.conf +root=u8.cyberlab.fhnw.ch.
+delv @127.0.0.1 u8.cyberlab-fhnw.ch MX -a /var/lib/bind/u8.cyberlab-fhnw.ch/u8-check.conf +root=u8.cyberlab-fhnw.ch.
 ```
 
 Relevante Ausgabe:
 
 ```text
 ; fully validated
-u8.cyberlab.fhnw.ch. 86400 IN MX 10 mail.u8.cyberlab.fhnw.ch.
+u8.cyberlab-fhnw.ch. 86400 IN MX 10 mail.u8.cyberlab-fhnw.ch.
 ```
 
-Zum Schluss wurde die Validierung über den CyberLab-DNS geprüft:
-
-```bash
-# command
-dig @192.168.64.10 mail.u8.cyberlab.fhnw.ch A +dnssec +noall +comments +answer
-```
-
-Relevante Ausgabe:
-
-```text
-;; flags: qr rd ra ad
-mail.u8.cyberlab.fhnw.ch. 10 IN A 192.168.97.64
-mail.u8.cyberlab.fhnw.ch. 10 IN RRSIG A 13 5 86400 ...
-```
-
-Das Flag `ad` steht für `Authenticated Data`. Damit ist bestätigt, dass der CyberLab-DNS die Antwort über DNSSEC validieren konnte.
+Damit ist DNSSEC für die Zone `u8.cyberlab-fhnw.ch` eingerichtet. BIND signiert die Zone automatisch, der DS-Record wurde aus dem KSK erzeugt und die lokale Validierung mit `delv` funktioniert.
 
 ---
 
@@ -2772,6 +2738,8 @@ Das Flag `ad` steht für `Authenticated Data`. Damit ist bestätigt, dass der Cy
 ### 11.2 Datenbank und vertrauenswuerdige Netze
 
 ### 11.3 Tests
+
+---
 
 ## 12 Backup
 
